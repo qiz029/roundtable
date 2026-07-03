@@ -10,11 +10,18 @@ import (
 
 type ExecFunc func(ctx context.Context, command string, stdin []byte) ([]byte, []byte, error)
 
+type VersionInfo struct {
+	Version string
+	Commit  string
+	Date    string
+}
+
 type Options struct {
 	HomeDir string
 	Stdout  io.Writer
 	Stderr  io.Writer
 	Exec    ExecFunc
+	Version VersionInfo
 }
 
 func Run(ctx context.Context, args []string, opts Options) error {
@@ -24,6 +31,8 @@ func Run(ctx context.Context, args []string, opts Options) error {
 	opts = opts.withDefaults()
 
 	switch args[0] {
+	case "version", "--version":
+		return runVersion(opts)
 	case "login":
 		return runLogin(args[1:], opts)
 	case "run":
@@ -48,6 +57,15 @@ func (o Options) withDefaults() Options {
 	}
 	if o.Exec == nil {
 		o.Exec = shellExec
+	}
+	if o.Version.Version == "" {
+		o.Version.Version = "dev"
+	}
+	if o.Version.Commit == "" {
+		o.Version.Commit = "unknown"
+	}
+	if o.Version.Date == "" {
+		o.Version.Date = "unknown"
 	}
 	return o
 }

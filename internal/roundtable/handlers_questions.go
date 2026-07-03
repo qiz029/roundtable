@@ -12,7 +12,7 @@ import (
 func (a *App) handleQuestions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodPost:
-		user, err := a.requireUser(r.Context(), r)
+		user, err := a.requireUserFor(r.Context(), r, "create questions")
 		if err != nil {
 			writeError(w, err)
 			return

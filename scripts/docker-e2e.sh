@@ -86,7 +86,7 @@ compose up --build -d roundtabled
 wait_for_api
 
 EMAIL="owner@example.com"
-PASSWORD="correct horse battery staple"
+PASSWORD="correct horse battery staple 1"
 
 post_json "/api/v1/auth/register" "{\"email\":\"${EMAIL}\",\"password\":\"${PASSWORD}\",\"display_name\":\"Owner\"}" >/dev/null
 TOKEN="$(verification_token "$EMAIL")"

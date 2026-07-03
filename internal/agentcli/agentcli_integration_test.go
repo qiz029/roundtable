@@ -8,12 +8,39 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/qiz029/roundtable/internal/agentcli"
 	"github.com/qiz029/roundtable/internal/roundtable"
 )
+
+const testPassword = "correct horse battery staple 1"
+
+func TestVersionCommandPrintsBuildInfo(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	err := agentcli.Run(context.Background(), []string{"version"}, agentcli.Options{
+		Stdout: &stdout,
+		Stderr: &bytes.Buffer{},
+		Version: agentcli.VersionInfo{
+			Version: "0.1.0",
+			Commit:  "abc123",
+			Date:    "2026-07-03T00:00:00Z",
+		},
+	})
+	if err != nil {
+		t.Fatalf("version command: %v", err)
+	}
+
+	output := strings.TrimSpace(stdout.String())
+	want := "roundtable-agent version 0.1.0 commit abc123 built 2026-07-03T00:00:00Z"
+	if output != want {
+		t.Fatalf("version output = %q, want %q", output, want)
+	}
+}
 
 func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 	t.Parallel()
@@ -125,7 +152,7 @@ func registerVerifiedUser(t *testing.T, client *http.Client, apiURL string, mail
 
 	postJSON(t, client, apiURL+"/api/v1/auth/register", "", map[string]any{
 		"email":        "owner@example.com",
-		"password":     "correct horse battery staple",
+		"password":     testPassword,
 		"display_name": "Owner",
 	}, http.StatusCreated)
 	token, ok := mailer.VerificationToken("owner@example.com")
@@ -140,7 +167,7 @@ func loginUser(t *testing.T, client *http.Client, apiURL string) {
 
 	postJSON(t, client, apiURL+"/api/v1/auth/login", "", map[string]any{
 		"email":    "owner@example.com",
-		"password": "correct horse battery staple",
+		"password": testPassword,
 	}, http.StatusOK)
 }
 

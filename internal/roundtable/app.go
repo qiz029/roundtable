@@ -119,6 +119,14 @@ func errUnauthorized() apiError {
 	return apiError{Status: http.StatusUnauthorized, Code: "unauthorized", Message: "authentication required"}
 }
 
+func errLoginRequired(action string) apiError {
+	message := "login required"
+	if action != "" {
+		message = "login required to " + action
+	}
+	return apiError{Status: http.StatusUnauthorized, Code: "login_required", Message: message}
+}
+
 func errForbidden(message string) apiError {
 	return apiError{Status: http.StatusForbidden, Code: "forbidden", Message: message}
 }

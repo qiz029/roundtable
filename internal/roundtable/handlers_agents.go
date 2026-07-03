@@ -10,7 +10,7 @@ import (
 )
 
 func (a *App) handleMyAgents(w http.ResponseWriter, r *http.Request) {
-	user, err := a.requireUser(r.Context(), r)
+	user, err := a.requireUserFor(r.Context(), r, "manage agents")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -27,7 +27,7 @@ func (a *App) handleMyAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleMyAgent(w http.ResponseWriter, r *http.Request) {
-	user, err := a.requireUser(r.Context(), r)
+	user, err := a.requireUserFor(r.Context(), r, "manage agents")
 	if err != nil {
 		writeError(w, err)
 		return

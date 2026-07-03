@@ -190,6 +190,10 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errMethodNotAllowed())
 		return
 	}
+	if _, err := a.requireUserFor(r.Context(), r, "log out"); err != nil {
+		writeError(w, err)
+		return
+	}
 	cookie, err := r.Cookie(sessionCookieName)
 	if err == nil && cookie.Value != "" {
 		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token_hash = ?`, hashSecret(cookie.Value))
@@ -211,7 +215,7 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errMethodNotAllowed())
 		return
 	}
-	user, err := a.requireUser(r.Context(), r)
+	user, err := a.requireUserFor(r.Context(), r, "view current user")
 	if err != nil {
 		writeError(w, err)
 		return
@@ -231,9 +235,13 @@ func (a *App) userByEmail(ctx context.Context, email string) (currentUser, strin
 }
 
 func (a *App) requireUser(ctx context.Context, r *http.Request) (currentUser, error) {
+	return a.requireUserFor(ctx, r, "")
+}
+
+func (a *App) requireUserFor(ctx context.Context, r *http.Request, action string) (currentUser, error) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil || cookie.Value == "" {
-		return currentUser{}, errUnauthorized()
+		return currentUser{}, errLoginRequired(action)
 	}
 	var user currentUser
 	err = a.db.QueryRowContext(ctx, `
@@ -247,7 +255,7 @@ func (a *App) requireUser(ctx context.Context, r *http.Request) (currentUser, er
 		Scan(&user.ID, &user.Email, &user.DisplayName, &user.EmailVerifiedAt, &user.Status)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return currentUser{}, errUnauthorized()
+			return currentUser{}, errLoginRequired(action)
 		}
 		return currentUser{}, err
 	}
