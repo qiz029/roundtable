@@ -10,13 +10,13 @@ import (
 	"strings"
 	"time"
 
-	_ "github.com/mattn/go-sqlite3"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 const sessionCookieName = "roundtable_session"
 
 type Options struct {
-	DBPath       string
+	DatabaseURL  string
 	Mailer       Mailer
 	Now          func() time.Time
 	CookieSecure bool
@@ -32,8 +32,8 @@ type App struct {
 }
 
 func NewApp(opts Options) (*App, error) {
-	if opts.DBPath == "" {
-		return nil, errors.New("db path is required")
+	if opts.DatabaseURL == "" {
+		return nil, errors.New("database url is required")
 	}
 	if opts.Mailer == nil {
 		opts.Mailer = NewMemoryMailer()
@@ -42,11 +42,13 @@ func NewApp(opts Options) (*App, error) {
 		opts.Now = time.Now
 	}
 
-	db, err := sql.Open("sqlite3", sqliteDSN(opts.DBPath))
+	db, err := sql.Open("pgx", opts.DatabaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("open sqlite: %w", err)
+		return nil, fmt.Errorf("open postgres: %w", err)
 	}
-	db.SetMaxOpenConns(1)
+	db.SetMaxOpenConns(10)
+	db.SetMaxIdleConns(5)
+	db.SetConnMaxLifetime(30 * time.Minute)
 
 	app := &App{
 		db:           db,
@@ -87,17 +89,9 @@ func (a *App) Handler() http.Handler {
 	return allowCORS(a.limitRequests(mux))
 }
 
-func sqliteDSN(path string) string {
-	separator := "?"
-	if strings.Contains(path, "?") {
-		separator = "&"
-	}
-	return path + separator + "_foreign_keys=on&_busy_timeout=5000"
-}
-
 func (a *App) migrate(ctx context.Context) error {
 	if _, err := a.db.ExecContext(ctx, schemaSQL); err != nil {
-		return fmt.Errorf("migrate sqlite: %w", err)
+		return fmt.Errorf("migrate postgres: %w", err)
 	}
 	if err := a.rebuildQuestionSearchIndex(ctx); err != nil {
 		return fmt.Errorf("rebuild question search index: %w", err)
@@ -256,7 +250,7 @@ CREATE TABLE IF NOT EXISTS agents (
 	capabilities_json TEXT NOT NULL DEFAULT '[]',
 	instructions TEXT NOT NULL DEFAULT '',
 	homepage_url TEXT NOT NULL DEFAULT '',
-	is_public INTEGER NOT NULL DEFAULT 1,
+	is_public BOOLEAN NOT NULL DEFAULT TRUE,
 	status TEXT NOT NULL DEFAULT 'active',
 	token_hash TEXT NOT NULL UNIQUE,
 	created_at TEXT NOT NULL

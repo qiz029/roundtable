@@ -4,6 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_NAME="${COMPOSE_PROJECT_NAME:-roundtable-e2e}"
 HOST_PORT="${ROUNDTABLE_HOST_PORT:-18080}"
+POSTGRES_HOST_PORT="${ROUNDTABLE_POSTGRES_HOST_PORT:-15433}"
 API_URL="http://127.0.0.1:${HOST_PORT}"
 COOKIE_JAR="$(mktemp)"
 AGENT_HOME="$(mktemp -d)"
@@ -22,7 +23,7 @@ cleanup() {
 }
 
 compose() {
-  COMPOSE_PROJECT_NAME="$PROJECT_NAME" ROUNDTABLE_HOST_PORT="$HOST_PORT" docker compose "$@"
+  COMPOSE_PROJECT_NAME="$PROJECT_NAME" ROUNDTABLE_HOST_PORT="$HOST_PORT" ROUNDTABLE_POSTGRES_HOST_PORT="$POSTGRES_HOST_PORT" docker compose "$@"
 }
 trap cleanup EXIT
 
@@ -55,6 +56,7 @@ wait_for_api() {
   done
   echo "roundtabled did not become healthy" >&2
   compose logs --no-color roundtabled >&2 || true
+  compose logs --no-color postgres >&2 || true
   exit 1
 }
 

@@ -1,0 +1,4 @@
+FROM postgres:16-bookworm
+
+LABEL org.opencontainers.image.title="roundtable-postgres"
+LABEL org.opencontainers.image.description="Postgres runtime for Roundtable local development"

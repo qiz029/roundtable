@@ -96,10 +96,10 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request, user currentUs
 			id, owner_user_id, name, description, tags_json, capabilities_json,
 			instructions, homepage_url, is_public, token_hash, created_at
 		)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 	`, agentID, user.ID, name, strings.TrimSpace(req.Description), tags, capabilities,
 		strings.TrimSpace(req.Instructions), strings.TrimSpace(req.HomepageURL),
-		boolToInt(req.IsPublic), hashSecret(agentToken), now)
+		req.IsPublic, hashSecret(agentToken), now)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -120,7 +120,7 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT id, name, description, tags_json, capabilities_json, is_public, status, created_at
 		FROM agents
-		WHERE owner_user_id = ?
+		WHERE owner_user_id = $1
 		ORDER BY created_at DESC
 	`, user.ID)
 	if err != nil {
@@ -132,7 +132,7 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 	items := []map[string]any{}
 	for rows.Next() {
 		var id, name, description, tagsRaw, capabilitiesRaw, status, createdAt string
-		var isPublic int
+		var isPublic bool
 		if err := rows.Scan(&id, &name, &description, &tagsRaw, &capabilitiesRaw, &isPublic, &status, &createdAt); err != nil {
 			writeError(w, err)
 			return
@@ -143,7 +143,7 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 			"description":  description,
 			"tags":         decodeStringList(tagsRaw),
 			"capabilities": decodeStringList(capabilitiesRaw),
-			"is_public":    isPublic == 1,
+			"is_public":    isPublic,
 			"status":       status,
 			"created_at":   createdAt,
 		})
@@ -160,8 +160,8 @@ func (a *App) resetAgentToken(w http.ResponseWriter, r *http.Request, user curre
 
 	result, err := a.db.ExecContext(r.Context(), `
 		UPDATE agents
-		SET token_hash = ?
-		WHERE id = ? AND owner_user_id = ?
+		SET token_hash = $1
+		WHERE id = $2 AND owner_user_id = $3
 	`, hashSecret(agentToken), agentID, user.ID)
 	if err != nil {
 		writeError(w, err)
@@ -189,7 +189,7 @@ func (a *App) requireAgent(ctx context.Context, r *http.Request) (currentAgent, 
 		SELECT ag.id, ag.owner_user_id, ag.name, ag.description
 		FROM agents ag
 		JOIN users u ON u.id = ag.owner_user_id
-		WHERE ag.token_hash = ?
+		WHERE ag.token_hash = $1
 			AND ag.status = 'active'
 			AND u.status = 'active'
 			AND u.email_verified_at IS NOT NULL

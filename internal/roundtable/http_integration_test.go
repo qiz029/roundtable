@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
-	"path/filepath"
 	"testing"
 	"time"
 
@@ -19,8 +18,7 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	mailer := roundtable.NewMemoryMailer()
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: mailer,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
@@ -143,8 +141,7 @@ func TestQuestionSearchMatchesTitleAndBody(t *testing.T) {
 	t.Parallel()
 
 	mailer := roundtable.NewMemoryMailer()
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: mailer,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
@@ -205,11 +202,11 @@ func TestQuestionSearchMatchesTitleAndBody(t *testing.T) {
 func TestQuestionSearchBackfillsExistingQuestions(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "roundtable.db")
+	databaseURL := newTestDatabaseURL(t)
 	mailer := roundtable.NewMemoryMailer()
 	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: dbPath,
-		Mailer: mailer,
+		DatabaseURL: databaseURL,
+		Mailer:      mailer,
 	})
 	if err != nil {
 		t.Fatalf("new app: %v", err)
@@ -234,8 +231,8 @@ func TestQuestionSearchBackfillsExistingQuestions(t *testing.T) {
 	}
 
 	reopened, err := roundtable.NewApp(roundtable.Options{
-		DBPath: dbPath,
-		Mailer: roundtable.NewMemoryMailer(),
+		DatabaseURL: databaseURL,
+		Mailer:      roundtable.NewMemoryMailer(),
 	})
 	if err != nil {
 		t.Fatalf("reopen app: %v", err)
@@ -258,8 +255,7 @@ func TestQuestionInvitesAtMostFiveAgents(t *testing.T) {
 	t.Parallel()
 
 	mailer := roundtable.NewMemoryMailer()
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: mailer,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
@@ -305,8 +301,7 @@ func TestAgentTokenResetAndInvitationExpiry(t *testing.T) {
 
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 	mailer := roundtable.NewMemoryMailer()
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: mailer,
 		Now: func() time.Time {
 			return now
@@ -378,8 +373,7 @@ func TestUnverifiedUserCannotCreateAgent(t *testing.T) {
 	t.Parallel()
 
 	mailer := roundtable.NewMemoryMailer()
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: mailer,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
@@ -416,8 +410,7 @@ func TestRegisterPasswordPolicy(t *testing.T) {
 	t.Parallel()
 
 	mailer := roundtable.NewMemoryMailer()
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: mailer,
 	})
 	if err != nil {
@@ -477,8 +470,7 @@ func TestAnonymousUserCanOnlyReadQuestionsAndAnswers(t *testing.T) {
 	t.Parallel()
 
 	mailer := roundtable.NewMemoryMailer()
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: mailer,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
@@ -543,8 +535,7 @@ func TestAnonymousUserCanOnlyReadQuestionsAndAnswers(t *testing.T) {
 func TestAuthRateLimit(t *testing.T) {
 	t.Parallel()
 
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: roundtable.NewMemoryMailer(),
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
@@ -579,8 +570,7 @@ func TestAgentAPIKeyRateLimit(t *testing.T) {
 	t.Parallel()
 
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: roundtable.NewMemoryMailer(),
 		Now: func() time.Time {
 			return now
@@ -635,8 +625,7 @@ func TestAgentAPIKeyRateLimit(t *testing.T) {
 func TestAgentHealthzDoesNotRequireBearerToken(t *testing.T) {
 	t.Parallel()
 
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: roundtable.NewMemoryMailer(),
 		RateLimit: roundtable.RateLimitConfig{
 			AgentPerSecond: 2,
@@ -660,8 +649,7 @@ func TestAgentHealthzDoesNotRequireBearerToken(t *testing.T) {
 func TestCORSAllowsBrowserFrontend(t *testing.T) {
 	t.Parallel()
 
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: roundtable.NewMemoryMailer(),
 	})
 	if err != nil {

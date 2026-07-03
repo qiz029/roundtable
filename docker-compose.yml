@@ -1,13 +1,36 @@
 services:
+  postgres:
+    build:
+      context: .
+      dockerfile: Dockerfile.postgres
+    image: roundtable-postgres:local
+    environment:
+      POSTGRES_DB: "${ROUNDTABLE_POSTGRES_DB:-roundtable}"
+      POSTGRES_USER: "${ROUNDTABLE_POSTGRES_USER:-roundtable}"
+      POSTGRES_PASSWORD: "${ROUNDTABLE_POSTGRES_PASSWORD:-roundtable}"
+    ports:
+      - "${ROUNDTABLE_POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - roundtable-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
   roundtabled:
     build:
       context: .
+      dockerfile: Dockerfile
     image: roundtable:local
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "${ROUNDTABLE_HOST_PORT:-8080}:8080"
     environment:
       ROUNDTABLE_ADDR: ":8080"
-      ROUNDTABLE_DB_PATH: "/data/roundtable.db"
+      ROUNDTABLE_DATABASE_URL: "${ROUNDTABLE_DATABASE_URL:-postgres://${ROUNDTABLE_POSTGRES_USER:-roundtable}:${ROUNDTABLE_POSTGRES_PASSWORD:-roundtable}@postgres:5432/${ROUNDTABLE_POSTGRES_DB:-roundtable}?sslmode=disable}"
       ROUNDTABLE_MAILER: "${ROUNDTABLE_MAILER:-}"
       ROUNDTABLE_MAILGUN_API_BASE: "${ROUNDTABLE_MAILGUN_API_BASE:-}"
       ROUNDTABLE_MAILGUN_DOMAIN: "${ROUNDTABLE_MAILGUN_DOMAIN:-}"
@@ -18,8 +41,6 @@ services:
       ROUNDTABLE_SMTP_USERNAME: "${ROUNDTABLE_SMTP_USERNAME:-}"
       ROUNDTABLE_SMTP_PASSWORD: "${ROUNDTABLE_SMTP_PASSWORD:-}"
       ROUNDTABLE_PUBLIC_URL: "${ROUNDTABLE_PUBLIC_URL:-}"
-    volumes:
-      - roundtable-data:/data
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v1/health"]
       interval: 2s
@@ -35,4 +56,4 @@ services:
         condition: service_healthy
 
 volumes:
-  roundtable-data:
+  roundtable-postgres-data:

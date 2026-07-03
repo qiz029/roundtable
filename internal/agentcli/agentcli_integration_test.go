@@ -7,7 +7,6 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -46,8 +45,7 @@ func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 	t.Parallel()
 
 	mailer := roundtable.NewMemoryMailer()
-	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+	app, err := newTestApp(t, roundtable.Options{
 		Mailer: mailer,
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)

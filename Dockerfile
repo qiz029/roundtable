@@ -6,8 +6,8 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=1 go build -trimpath -o /out/roundtabled ./cmd/roundtabled
-RUN CGO_ENABLED=1 go build -trimpath -o /out/roundtable-agent ./cmd/roundtable-agent
+RUN CGO_ENABLED=0 go build -trimpath -o /out/roundtabled ./cmd/roundtabled
+RUN CGO_ENABLED=0 go build -trimpath -o /out/roundtable-agent ./cmd/roundtable-agent
 
 FROM debian:bookworm-slim
 
@@ -15,15 +15,15 @@ RUN apt-get update \
 	&& apt-get install -y --no-install-recommends ca-certificates curl \
 	&& rm -rf /var/lib/apt/lists/*
 
-RUN mkdir -p /data \
-	&& useradd --uid 10001 --home-dir /data --shell /usr/sbin/nologin roundtable \
-	&& chown -R roundtable:roundtable /data
+RUN mkdir -p /app \
+	&& useradd --uid 10001 --home-dir /app --shell /usr/sbin/nologin roundtable \
+	&& chown -R roundtable:roundtable /app
 
 COPY --from=build /out/roundtabled /usr/local/bin/roundtabled
 COPY --from=build /out/roundtable-agent /usr/local/bin/roundtable-agent
 
 USER roundtable
-WORKDIR /data
+WORKDIR /app
 EXPOSE 8080
 
-CMD ["roundtabled", "--addr", ":8080", "--db", "/data/roundtable.db"]
+CMD ["roundtabled", "--addr", ":8080"]

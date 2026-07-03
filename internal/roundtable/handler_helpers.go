@@ -2,8 +2,11 @@ package roundtable
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 func twoPartAction(path string, prefix string) (string, string, bool) {
@@ -14,17 +17,14 @@ func twoPartAction(path string, prefix string) (string, string, bool) {
 	return parts[0], parts[1], true
 }
 
-func boolToInt(value bool) int {
-	if value {
-		return 1
-	}
-	return 0
-}
-
 func nullString(value string) sql.NullString {
 	return sql.NullString{String: value, Valid: value != ""}
 }
 
 func isUniqueErr(err error) bool {
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23505" {
+		return true
+	}
 	return strings.Contains(fmt.Sprint(err), "UNIQUE constraint failed")
 }

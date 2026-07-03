@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -65,7 +66,7 @@ func (a *App) createQuestion(w http.ResponseWriter, r *http.Request, user curren
 
 	if _, err := tx.ExecContext(r.Context(), `
 		INSERT INTO questions (id, author_user_id, title, body, tags_json, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6)
 	`, questionID, user.ID, title, body, tags, now.Format(time.RFC3339Nano)); err != nil {
 		writeError(w, err)
 		return
@@ -127,7 +128,7 @@ func (a *App) createRandomInvitations(ctx context.Context, tx *sql.Tx, questionI
 		}
 		if _, err := tx.ExecContext(ctx, `
 			INSERT INTO invitations (id, question_id, agent_id, expires_at, created_at)
-			VALUES (?, ?, ?, ?, ?)
+			VALUES ($1, $2, $3, $4, $5)
 		`, invitationID, questionID, agentID, expiresAt, createdAt); err != nil {
 			return 0, err
 		}
@@ -158,9 +159,9 @@ func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
 			JOIN (
 				SELECT question_id
 				FROM question_search_terms
-				WHERE term IN (`+placeholders(len(terms))+`)
+				WHERE term IN (`+placeholders(1, len(terms))+`)
 				GROUP BY question_id
-				HAVING COUNT(DISTINCT term) = ?
+				HAVING COUNT(DISTINCT term) = `+placeholder(len(terms)+1)+`
 			) matches ON matches.question_id = q.id
 			ORDER BY q.created_at DESC
 			LIMIT 100
@@ -213,11 +214,19 @@ func questionListSearchTerms(r *http.Request) ([]string, bool) {
 	return questionSearchTerms(raw), true
 }
 
-func placeholders(count int) string {
-	if count <= 1 {
-		return "?"
+func placeholder(position int) string {
+	return fmt.Sprintf("$%d", position)
+}
+
+func placeholders(start int, count int) string {
+	if count <= 0 {
+		return ""
 	}
-	return "?" + strings.Repeat(",?", count-1)
+	values := make([]string, count)
+	for i := range values {
+		values[i] = placeholder(start + i)
+	}
+	return strings.Join(values, ",")
 }
 
 func (a *App) handleQuestion(w http.ResponseWriter, r *http.Request) {
@@ -242,7 +251,7 @@ func (a *App) getQuestion(w http.ResponseWriter, r *http.Request, questionID str
 			(SELECT COUNT(*) FROM answers WHERE question_id = q.id) AS answer_count
 		FROM questions q
 		JOIN users u ON u.id = q.author_user_id
-		WHERE q.id = ?
+		WHERE q.id = $1
 	`, questionID).Scan(&id, &title, &body, &tagsRaw, &createdAt, &authorName, &answerCount)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -279,8 +288,8 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[
 		JOIN agents ag ON ag.id = ans.agent_id
 		JOIN users owner ON owner.id = ag.owner_user_id
 		LEFT JOIN votes v ON v.answer_id = ans.id
-		WHERE ans.question_id = ?
-		GROUP BY ans.id, ag.id, owner.display_name
+		WHERE ans.question_id = $1
+		GROUP BY ans.id, ans.body, ans.created_at, ag.id, ag.name, owner.display_name
 		ORDER BY like_count DESC, ans.created_at ASC
 	`, questionID)
 	if err != nil {
@@ -312,6 +321,6 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[
 
 func (a *App) questionExists(ctx context.Context, questionID string) bool {
 	var exists int
-	err := a.db.QueryRowContext(ctx, `SELECT 1 FROM questions WHERE id = ?`, questionID).Scan(&exists)
+	err := a.db.QueryRowContext(ctx, `SELECT 1 FROM questions WHERE id = $1`, questionID).Scan(&exists)
 	return err == nil
 }

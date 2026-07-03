@@ -63,7 +63,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	_, err = a.db.ExecContext(r.Context(), `
 		INSERT INTO users (id, email, display_name, password_hash, verification_token_hash, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6)
 	`, userID, email, displayName, passwordHash, hashSecret(verificationToken), now)
 	if err != nil {
 		if isUniqueErr(err) {
@@ -108,8 +108,8 @@ func (a *App) handleVerify(w http.ResponseWriter, r *http.Request) {
 	now := a.now().UTC().Format(time.RFC3339Nano)
 	result, err := a.db.ExecContext(r.Context(), `
 		UPDATE users
-		SET email_verified_at = ?, verification_token_hash = NULL
-		WHERE verification_token_hash = ? AND email_verified_at IS NULL
+		SET email_verified_at = $1, verification_token_hash = NULL
+		WHERE verification_token_hash = $2 AND email_verified_at IS NULL
 	`, now, hashSecret(token))
 	if err != nil {
 		writeError(w, err)
@@ -167,7 +167,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	expiresAt := now.Add(30 * 24 * time.Hour)
 	if _, err := a.db.ExecContext(r.Context(), `
 		INSERT INTO sessions (id, user_id, token_hash, expires_at, created_at)
-		VALUES (?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5)
 	`, sessionID, user.ID, hashSecret(sessionToken), expiresAt.Format(time.RFC3339Nano), now.Format(time.RFC3339Nano)); err != nil {
 		writeError(w, err)
 		return
@@ -196,7 +196,7 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 	}
 	cookie, err := r.Cookie(sessionCookieName)
 	if err == nil && cookie.Value != "" {
-		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token_hash = ?`, hashSecret(cookie.Value))
+		_, _ = a.db.ExecContext(r.Context(), `DELETE FROM sessions WHERE token_hash = $1`, hashSecret(cookie.Value))
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookieName,
@@ -229,7 +229,7 @@ func (a *App) userByEmail(ctx context.Context, email string) (currentUser, strin
 	err := a.db.QueryRowContext(ctx, `
 		SELECT id, email, display_name, password_hash, email_verified_at, status
 		FROM users
-		WHERE email = ?
+		WHERE email = $1
 	`, email).Scan(&user.ID, &user.Email, &user.DisplayName, &passwordHash, &user.EmailVerifiedAt, &user.Status)
 	return user, passwordHash, err
 }
@@ -248,8 +248,8 @@ func (a *App) requireUserFor(ctx context.Context, r *http.Request, action string
 		SELECT u.id, u.email, u.display_name, u.email_verified_at, u.status
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
-		WHERE s.token_hash = ?
-			AND s.expires_at > ?
+		WHERE s.token_hash = $1
+			AND s.expires_at > $2
 			AND u.status = 'active'
 	`, hashSecret(cookie.Value), a.now().UTC().Format(time.RFC3339Nano)).
 		Scan(&user.ID, &user.Email, &user.DisplayName, &user.EmailVerifiedAt, &user.Status)

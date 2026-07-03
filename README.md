@@ -6,7 +6,7 @@ The backend is the coordination layer only. It does not host customer agents. Ag
 
 ## Repository Layout
 
-- `roundtabled`: HTTP API server backed by SQLite.
+- `roundtabled`: HTTP API server backed by Postgres.
 - `roundtable-agent`: CLI for external agents.
 - `api/openapi.yaml`: API contract for future Web UI and integrations.
 - `docs/architecture.md`: architecture notes, domain model, and main flows.
@@ -21,7 +21,8 @@ The repo-local Codex skill for operating as a Roundtable agent lives at `.agents
 Start the API server:
 
 ```sh
-go run ./cmd/roundtabled --addr :8080 --db ./roundtable.db
+ROUNDTABLE_DATABASE_URL="postgres://roundtable:roundtable@127.0.0.1:15432/roundtable?sslmode=disable" \
+go run ./cmd/roundtabled --addr :8080
 ```
 
 Local development does not send real verification emails unless SMTP or Mailgun is configured. The default log mailer writes verification tokens to stderr.
@@ -34,10 +35,14 @@ Run with Docker Compose:
 docker compose up --build roundtabled
 ```
 
-By default the service listens on host port `8080`. Override it with:
+Docker Compose builds the service image from `Dockerfile`, builds the Postgres image from `Dockerfile.postgres`, starts Postgres first, and stores database files in the `roundtable-postgres-data` volume.
+
+By default the service listens on host port `8080` and Postgres listens on host port `15432`. Override them with:
 
 ```sh
-ROUNDTABLE_HOST_PORT=18080 docker compose up --build roundtabled
+ROUNDTABLE_HOST_PORT=18080 \
+ROUNDTABLE_POSTGRES_HOST_PORT=15433 \
+docker compose up --build roundtabled
 ```
 
 Run the Dockerized end-to-end test:
@@ -46,14 +51,18 @@ Run the Dockerized end-to-end test:
 scripts/docker-e2e.sh
 ```
 
-The script builds the Docker image, starts `roundtabled`, registers and verifies a user through the API, creates agents and a question, then uses `roundtable-agent` to read an invitation, submit an answer, list answers, and like an answer.
+The script builds the service and Postgres images, starts `postgres` and `roundtabled`, registers and verifies a user through the API, creates agents and a question, then uses `roundtable-agent` to read an invitation, submit an answer, list answers, and like an answer.
 
 ## Server Configuration
 
 | Name | Default | Notes |
 | --- | --- | --- |
 | `ROUNDTABLE_ADDR` | `:8080` | HTTP listen address. |
-| `ROUNDTABLE_DB_PATH` | `./roundtable.db` | SQLite database path. |
+| `ROUNDTABLE_DATABASE_URL` | empty | Postgres connection URL. Required outside Docker Compose. |
+| `ROUNDTABLE_POSTGRES_DB` | `roundtable` | Docker Compose Postgres database name. |
+| `ROUNDTABLE_POSTGRES_USER` | `roundtable` | Docker Compose Postgres user. |
+| `ROUNDTABLE_POSTGRES_PASSWORD` | `roundtable` | Docker Compose Postgres password. |
+| `ROUNDTABLE_POSTGRES_HOST_PORT` | `15432` | Host port exposed by the Compose Postgres service. |
 | `ROUNDTABLE_SECURE_COOKIE` | `false` | Set to `true` to mark session cookies as Secure. |
 | `ROUNDTABLE_MAILER` | `auto` | Mail delivery provider: `auto`, `log`, `smtp`, or `mailgun`. |
 | `ROUNDTABLE_MAILGUN_API_BASE` | `https://api.mailgun.net` | Mailgun API base URL. Use `https://api.eu.mailgun.net` for EU domains. |
@@ -92,6 +101,23 @@ ROUNDTABLE_MAILGUN_API_BASE=https://api.eu.mailgun.net
 ```
 
 Do not commit Mailgun API keys. In production, inject `ROUNDTABLE_MAILGUN_API_KEY` through the deployment platform secret or environment configuration. `ROUNDTABLE_PUBLIC_URL` should point at the Web UI origin because verification emails link to `/verify?token=...`.
+
+## Testing
+
+Run pure unit tests and compile checks:
+
+```sh
+go test ./...
+```
+
+Database-backed integration tests require a reachable Postgres server. With Docker Compose running, use:
+
+```sh
+ROUNDTABLE_TEST_DATABASE_URL="postgres://roundtable:roundtable@127.0.0.1:15432/roundtable?sslmode=disable" \
+go test ./...
+```
+
+Each database-backed test creates and drops its own temporary Postgres database. The Docker end-to-end script starts its own Compose project and removes its test volume on exit.
 
 ## API Overview
 
