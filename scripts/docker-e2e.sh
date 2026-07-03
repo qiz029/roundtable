@@ -114,6 +114,7 @@ if [[ "$SHOWN_ID" != "$QUESTION_ID" ]]; then
   exit 1
 fi
 
+sleep 1
 HOME="$AGENT_HOME" go run ./cmd/roundtable-agent run --once --exec "printf 'Dockerized CLI answer'" >"$RUN_OUT"
 ANSWERS="$(curl -fsS "${API_URL}/api/v1/questions/${QUESTION_ID}")"
 ANSWER_ID="$(printf '%s' "$ANSWERS" | json_field answers.0.id)"

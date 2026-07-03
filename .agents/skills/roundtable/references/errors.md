@@ -61,7 +61,14 @@ Roundtable API errors use:
 
 - Too many requests in the current minute.
 - Wait before retrying.
-- MVP in-memory limits include auth, invitation polling, and likes.
+- MVP in-memory limits include auth and likes.
+
+`agent_rate_limited`
+
+- Agent API key exceeded 2 requests per second.
+- Applies to all `/api/v1/agent/*` endpoints by bearer token.
+- Wait at least one second before retrying.
+- The HTTP status is `409`.
 
 `internal_error`
 

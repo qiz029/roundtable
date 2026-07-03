@@ -70,6 +70,10 @@ func (a *App) createQuestion(w http.ResponseWriter, r *http.Request, user curren
 		writeError(w, err)
 		return
 	}
+	if err := a.indexQuestionSearchTerms(r.Context(), tx, questionID, title, body); err != nil {
+		writeError(w, err)
+		return
+	}
 	invitationCount, err := a.createRandomInvitations(r.Context(), tx, questionID, now)
 	if err != nil {
 		writeError(w, err)
@@ -132,7 +136,37 @@ func (a *App) createRandomInvitations(ctx context.Context, tx *sql.Tx, questionI
 }
 
 func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
-	rows, err := a.db.QueryContext(r.Context(), `
+	terms, searching := questionListSearchTerms(r)
+	if searching && len(terms) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"items": []map[string]any{}})
+		return
+	}
+
+	var rows *sql.Rows
+	var err error
+	if searching {
+		args := make([]any, 0, len(terms)+1)
+		for _, term := range terms {
+			args = append(args, term)
+		}
+		args = append(args, len(terms))
+		rows, err = a.db.QueryContext(r.Context(), `
+			SELECT q.id, q.title, q.body, q.tags_json, q.created_at, u.display_name,
+				(SELECT COUNT(*) FROM answers WHERE question_id = q.id) AS answer_count
+			FROM questions q
+			JOIN users u ON u.id = q.author_user_id
+			JOIN (
+				SELECT question_id
+				FROM question_search_terms
+				WHERE term IN (`+placeholders(len(terms))+`)
+				GROUP BY question_id
+				HAVING COUNT(DISTINCT term) = ?
+			) matches ON matches.question_id = q.id
+			ORDER BY q.created_at DESC
+			LIMIT 100
+		`, args...)
+	} else {
+		rows, err = a.db.QueryContext(r.Context(), `
 		SELECT q.id, q.title, q.body, q.tags_json, q.created_at, u.display_name,
 			(SELECT COUNT(*) FROM answers WHERE question_id = q.id) AS answer_count
 		FROM questions q
@@ -140,6 +174,7 @@ func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
 		ORDER BY q.created_at DESC
 		LIMIT 100
 	`)
+	}
 	if err != nil {
 		writeError(w, err)
 		return
@@ -165,6 +200,24 @@ func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func questionListSearchTerms(r *http.Request) ([]string, bool) {
+	raw := strings.TrimSpace(r.URL.Query().Get("q"))
+	if raw == "" {
+		raw = strings.TrimSpace(r.URL.Query().Get("query"))
+	}
+	if raw == "" {
+		return nil, false
+	}
+	return questionSearchTerms(raw), true
+}
+
+func placeholders(count int) string {
+	if count <= 1 {
+		return "?"
+	}
+	return "?" + strings.Repeat(",?", count-1)
 }
 
 func (a *App) handleQuestion(w http.ResponseWriter, r *http.Request) {
@@ -220,13 +273,14 @@ func (a *App) getQuestion(w http.ResponseWriter, r *http.Request, questionID str
 
 func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[string]any, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT ans.id, ans.body, ans.created_at, ag.id, ag.name,
+		SELECT ans.id, ans.body, ans.created_at, ag.id, ag.name, owner.display_name,
 			COALESCE(SUM(v.value), 0) AS like_count
 		FROM answers ans
 		JOIN agents ag ON ag.id = ans.agent_id
+		JOIN users owner ON owner.id = ag.owner_user_id
 		LEFT JOIN votes v ON v.answer_id = ans.id
 		WHERE ans.question_id = ?
-		GROUP BY ans.id
+		GROUP BY ans.id, ag.id, owner.display_name
 		ORDER BY like_count DESC, ans.created_at ASC
 	`, questionID)
 	if err != nil {
@@ -236,9 +290,9 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[
 
 	answers := []map[string]any{}
 	for rows.Next() {
-		var answerID, body, createdAt, agentID, agentName string
+		var answerID, body, createdAt, agentID, agentName, ownerName string
 		var likeCount int
-		if err := rows.Scan(&answerID, &body, &createdAt, &agentID, &agentName, &likeCount); err != nil {
+		if err := rows.Scan(&answerID, &body, &createdAt, &agentID, &agentName, &ownerName, &likeCount); err != nil {
 			return nil, err
 		}
 		answers = append(answers, map[string]any{
@@ -246,8 +300,9 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[
 			"body":       body,
 			"created_at": createdAt,
 			"agent": map[string]any{
-				"id":   agentID,
-				"name": agentName,
+				"id":         agentID,
+				"name":       agentName,
+				"owner_name": ownerName,
 			},
 			"like_count": likeCount,
 		})
