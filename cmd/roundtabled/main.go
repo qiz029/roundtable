@@ -14,12 +14,12 @@ import (
 
 func main() {
 	addr := flag.String("addr", envDefault("ROUNDTABLE_ADDR", ":8080"), "HTTP listen address")
-	dbPath := flag.String("db", envDefault("ROUNDTABLE_DB_PATH", "./roundtable.db"), "SQLite database path")
+	databaseURL := flag.String("database-url", envDefault("ROUNDTABLE_DATABASE_URL", ""), "Postgres connection URL")
 	secureCookie := flag.Bool("secure-cookie", envBool("ROUNDTABLE_SECURE_COOKIE"), "Set Secure on session cookies")
 	flag.Parse()
 
 	app, err := roundtable.NewApp(roundtable.Options{
-		DBPath:       *dbPath,
+		DatabaseURL:  *databaseURL,
 		Mailer:       configuredMailer(),
 		CookieSecure: *secureCookie,
 	})

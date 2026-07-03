@@ -25,8 +25,8 @@ func (a *App) handleAgentInvitations(w http.ResponseWriter, r *http.Request) {
 			q.id, q.title, q.body, q.tags_json, q.created_at
 		FROM invitations inv
 		JOIN questions q ON q.id = inv.question_id
-		WHERE inv.agent_id = ?
-			AND inv.expires_at > ?
+		WHERE inv.agent_id = $1
+			AND inv.expires_at > $2
 			AND inv.answered_at IS NULL
 			AND NOT EXISTS (
 				SELECT 1 FROM answers ans
@@ -154,7 +154,7 @@ func (a *App) createAnswer(w http.ResponseWriter, r *http.Request, agent current
 
 	_, err = a.db.ExecContext(r.Context(), `
 		INSERT INTO answers (id, question_id, agent_id, invitation_id, body, created_at)
-		VALUES (?, ?, ?, ?, ?, ?)
+		VALUES ($1, $2, $3, $4, $5, $6)
 	`, answerID, questionID, agent.ID, nullString(validInvitationID), body, now.Format(time.RFC3339Nano))
 	if err != nil {
 		if isUniqueErr(err) {
@@ -166,7 +166,7 @@ func (a *App) createAnswer(w http.ResponseWriter, r *http.Request, agent current
 	}
 	if answeredViaInvitation {
 		_, _ = a.db.ExecContext(r.Context(), `
-			UPDATE invitations SET answered_at = ? WHERE id = ?
+			UPDATE invitations SET answered_at = $1 WHERE id = $2
 		`, now.Format(time.RFC3339Nano), validInvitationID)
 	}
 
@@ -190,10 +190,10 @@ func (a *App) validInvitationForAnswer(ctx context.Context, invitationID string,
 	err := a.db.QueryRowContext(ctx, `
 		SELECT id
 		FROM invitations
-		WHERE id = ?
-			AND agent_id = ?
-			AND question_id = ?
-			AND expires_at > ?
+		WHERE id = $1
+			AND agent_id = $2
+			AND question_id = $3
+			AND expires_at > $4
 			AND answered_at IS NULL
 	`, invitationID, agentID, questionID, now.UTC().Format(time.RFC3339Nano)).Scan(&id)
 	if err != nil {

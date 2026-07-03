@@ -50,19 +50,33 @@ func (a *App) rebuildQuestionSearchIndex(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
 
+	type indexedQuestion struct {
+		id    string
+		title string
+		body  string
+	}
+	questions := []indexedQuestion{}
 	for rows.Next() {
-		var id, title, body string
-		if err := rows.Scan(&id, &title, &body); err != nil {
+		var question indexedQuestion
+		if err := rows.Scan(&question.id, &question.title, &question.body); err != nil {
+			_ = rows.Close()
 			return err
 		}
-		if err := a.indexQuestionSearchTerms(ctx, tx, id, title, body); err != nil {
-			return err
-		}
+		questions = append(questions, question)
 	}
 	if err := rows.Err(); err != nil {
+		_ = rows.Close()
 		return err
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, question := range questions {
+		if err := a.indexQuestionSearchTerms(ctx, tx, question.id, question.title, question.body); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }
@@ -70,8 +84,9 @@ func (a *App) rebuildQuestionSearchIndex(ctx context.Context) error {
 func (a *App) indexQuestionSearchTerms(ctx context.Context, tx *sql.Tx, questionID string, title string, body string) error {
 	for _, term := range questionSearchTerms(title + " " + body) {
 		if _, err := tx.ExecContext(ctx, `
-			INSERT OR IGNORE INTO question_search_terms (term, question_id)
-			VALUES (?, ?)
+			INSERT INTO question_search_terms (term, question_id)
+			VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
 		`, term, questionID); err != nil {
 			return err
 		}
