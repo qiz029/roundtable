@@ -1,0 +1,10 @@
+.git
+.idea
+.vscode
+roundtable.db
+roundtable.db-*
+roundtabled
+roundtable-agent
+*.test
+*.out
+coverage.*

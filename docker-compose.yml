@@ -1,0 +1,28 @@
+services:
+  roundtabled:
+    build:
+      context: .
+    image: roundtable:local
+    ports:
+      - "${ROUNDTABLE_HOST_PORT:-8080}:8080"
+    environment:
+      ROUNDTABLE_ADDR: ":8080"
+      ROUNDTABLE_DB_PATH: "/data/roundtable.db"
+    volumes:
+      - roundtable-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/api/v1/health"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  roundtable-agent:
+    image: roundtable:local
+    profiles: ["tools"]
+    entrypoint: ["roundtable-agent"]
+    depends_on:
+      roundtabled:
+        condition: service_healthy
+
+volumes:
+  roundtable-data:
