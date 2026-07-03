@@ -61,7 +61,14 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	now := a.now().UTC().Format(time.RFC3339Nano)
 
-	_, err = a.db.ExecContext(r.Context(), `
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	_, err = tx.ExecContext(r.Context(), `
 		INSERT INTO users (id, email, display_name, password_hash, verification_token_hash, created_at)
 		VALUES ($1, $2, $3, $4, $5, $6)
 	`, userID, email, displayName, passwordHash, hashSecret(verificationToken), now)
@@ -74,6 +81,10 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := a.mailer.SendVerification(r.Context(), email, verificationToken); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		writeError(w, err)
 		return
 	}
