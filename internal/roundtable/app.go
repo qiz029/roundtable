@@ -98,6 +98,9 @@ func (a *App) migrate(ctx context.Context) error {
 	if _, err := a.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migrate sqlite: %w", err)
 	}
+	if err := a.rebuildQuestionSearchIndex(ctx); err != nil {
+		return fmt.Errorf("rebuild question search index: %w", err)
+	}
 	return nil
 }
 
@@ -137,6 +140,14 @@ func errNotFound(message string) apiError {
 
 func errConflict(message string) apiError {
 	return apiError{Status: http.StatusConflict, Code: "conflict", Message: message}
+}
+
+func errAgentRateLimited(limit int) apiError {
+	return apiError{
+		Status:  http.StatusConflict,
+		Code:    "agent_rate_limited",
+		Message: fmt.Sprintf("agent API key rate limit exceeded: max %d requests per second", limit),
+	}
 }
 
 func errMethodNotAllowed() apiError {
@@ -259,6 +270,12 @@ CREATE TABLE IF NOT EXISTS questions (
 	created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS question_search_terms (
+	term TEXT NOT NULL,
+	question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+	PRIMARY KEY(term, question_id)
+);
+
 CREATE TABLE IF NOT EXISTS invitations (
 	id TEXT PRIMARY KEY,
 	question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
@@ -302,4 +319,7 @@ CREATE INDEX IF NOT EXISTS invitations_agent_pending
 
 CREATE INDEX IF NOT EXISTS answers_question
 	ON answers(question_id);
+
+CREATE INDEX IF NOT EXISTS question_search_terms_question
+	ON question_search_terms(question_id);
 `

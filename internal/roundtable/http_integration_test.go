@@ -25,6 +25,9 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
 	})
 	if err != nil {
 		t.Fatalf("new app: %v", err)
@@ -116,6 +119,10 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 	if got := stringField(t, answer, "id"); got != answerID {
 		t.Fatalf("answer id = %q, want %q", got, answerID)
 	}
+	agent := mapField(t, answer, "agent")
+	if got := stringField(t, agent, "owner_name"); got != "Owner" {
+		t.Fatalf("answer agent owner_name = %q, want Owner", got)
+	}
 	if got := intField(t, answer, "like_count"); got != 0 {
 		t.Fatalf("initial like_count = %d, want 0", got)
 	}
@@ -130,6 +137,121 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 	}
 
 	postJSON(t, agentClient, server.URL+"/api/v1/agent/answers/"+answerID+"/like", agentToken, nil, http.StatusForbidden)
+}
+
+func TestQuestionSearchMatchesTitleAndBody(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := roundtable.NewApp(roundtable.Options{
+		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
+	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "owner@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+
+	titleMatch := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Mercury release planning",
+		"body":  "How should we stage a backend release?",
+		"tags":  []string{"release"},
+	}, http.StatusCreated)
+	bodyMatch := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Search implementation",
+		"body":  "Can the question index find mercury when it appears in the description?",
+		"tags":  []string{"search"},
+	}, http.StatusCreated)
+	postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Lunch menu",
+		"body":  "This should not match the query.",
+		"tags":  []string{"misc"},
+	}, http.StatusCreated)
+
+	found := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?q=mercury", "", http.StatusOK)
+	items := listField(t, found, "items")
+	if len(items) != 2 {
+		t.Fatalf("search result count = %d, want 2", len(items))
+	}
+	foundIDs := map[string]bool{}
+	for _, item := range items {
+		foundIDs[stringField(t, item.(map[string]any), "id")] = true
+	}
+	for _, wantID := range []string{stringField(t, titleMatch, "id"), stringField(t, bodyMatch, "id")} {
+		if !foundIDs[wantID] {
+			t.Fatalf("search result ids = %#v, missing %s", foundIDs, wantID)
+		}
+	}
+
+	noMatch := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?q=banana", "", http.StatusOK)
+	if got := len(listField(t, noMatch, "items")); got != 0 {
+		t.Fatalf("no-match result count = %d, want 0", got)
+	}
+}
+
+func TestQuestionSearchBackfillsExistingQuestions(t *testing.T) {
+	t.Parallel()
+
+	dbPath := filepath.Join(t.TempDir(), "roundtable.db")
+	mailer := roundtable.NewMemoryMailer()
+	app, err := roundtable.NewApp(roundtable.Options{
+		DBPath: dbPath,
+		Mailer: mailer,
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	server := httptest.NewServer(app.Handler())
+
+	userClient := newHTTPClient(t)
+	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
+	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "owner@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+	question := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Backfill searchable question",
+		"body":  "Existing rows should be indexed on startup.",
+		"tags":  []string{"search"},
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+	server.Close()
+	if err := app.Close(); err != nil {
+		t.Fatalf("close app: %v", err)
+	}
+
+	reopened, err := roundtable.NewApp(roundtable.Options{
+		DBPath: dbPath,
+		Mailer: roundtable.NewMemoryMailer(),
+	})
+	if err != nil {
+		t.Fatalf("reopen app: %v", err)
+	}
+	defer reopened.Close()
+	reopenedServer := httptest.NewServer(reopened.Handler())
+	defer reopenedServer.Close()
+
+	found := getJSON(t, newHTTPClient(t), reopenedServer.URL+"/api/v1/questions?q=backfill", "", http.StatusOK)
+	items := listField(t, found, "items")
+	if len(items) != 1 {
+		t.Fatalf("search result count after reopen = %d, want 1", len(items))
+	}
+	if got := stringField(t, items[0].(map[string]any), "id"); got != questionID {
+		t.Fatalf("search result id after reopen = %q, want %q", got, questionID)
+	}
 }
 
 func TestQuestionInvitesAtMostFiveAgents(t *testing.T) {
@@ -453,6 +575,63 @@ func TestAuthRateLimit(t *testing.T) {
 	}
 }
 
+func TestAgentAPIKeyRateLimit(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := roundtable.NewApp(roundtable.Options{
+		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+		Mailer: roundtable.NewMemoryMailer(),
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Handler()
+	agentToken := "rt_agent_test_one"
+	otherAgentToken := "rt_agent_test_two"
+
+	for i, path := range []string{"/api/v1/agent/invitations", "/api/v1/agent/questions"} {
+		resp := getDirectBearer(handler, path, agentToken)
+		if resp.Code != http.StatusUnauthorized {
+			t.Fatalf("agent request %d status = %d, want %d", i+1, resp.Code, http.StatusUnauthorized)
+		}
+	}
+
+	limited := getDirectBearer(handler, "/api/v1/agent/questions/qst_missing", agentToken)
+	if limited.Code != http.StatusConflict {
+		t.Fatalf("agent rate limited status = %d, want %d", limited.Code, http.StatusConflict)
+	}
+	var limitedBody map[string]any
+	if err := json.NewDecoder(limited.Body).Decode(&limitedBody); err != nil {
+		t.Fatalf("decode rate limit response: %v", err)
+	}
+	if got := limitedBody["code"]; got != "agent_rate_limited" {
+		t.Fatalf("rate limit code = %#v, want agent_rate_limited", got)
+	}
+	if got := limitedBody["message"]; got != "agent API key rate limit exceeded: max 2 requests per second" {
+		t.Fatalf("rate limit message = %#v", got)
+	}
+
+	otherKeyResp := getDirectBearer(handler, "/api/v1/agent/invitations", otherAgentToken)
+	if otherKeyResp.Code != http.StatusUnauthorized {
+		t.Fatalf("other api key status = %d, want %d", otherKeyResp.Code, http.StatusUnauthorized)
+	}
+
+	now = now.Add(time.Second)
+	nextSecondResp := getDirectBearer(handler, "/api/v1/agent/invitations", agentToken)
+	if nextSecondResp.Code != http.StatusUnauthorized {
+		t.Fatalf("next second status = %d, want %d", nextSecondResp.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestCORSAllowsBrowserFrontend(t *testing.T) {
 	t.Parallel()
 
@@ -529,6 +708,14 @@ func postDirectJSON(t *testing.T, handler http.Handler, path string, body map[st
 	}
 	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(payload))
 	req.Header.Set("Content-Type", "application/json")
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	return resp
+}
+
+func getDirectBearer(handler http.Handler, path string, bearerToken string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	req.Header.Set("Authorization", "Bearer "+bearerToken)
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 	return resp

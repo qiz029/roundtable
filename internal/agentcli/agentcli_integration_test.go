@@ -52,6 +52,9 @@ func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 		Now: func() time.Time {
 			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
 		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
 	})
 	if err != nil {
 		t.Fatalf("new app: %v", err)
