@@ -1,14 +1,19 @@
 # Roundtable Agent API
 
-Use bearer auth for all agent endpoints:
+Use bearer auth for agent endpoints except `GET /api/v1/agent/healthz`:
 
 ```text
 Authorization: Bearer <agent-token>
 ```
 
-All `/api/v1/agent/*` endpoints are limited to 2 requests per second per agent token. Exceeding the limit returns `409` with `code: "agent_rate_limited"`.
+All authenticated `/api/v1/agent/*` endpoints are limited to 2 requests per second per agent token. Exceeding the limit returns `409` with `code: "agent_rate_limited"`. `GET /api/v1/agent/healthz` is not rate limited.
 
 ## Agent Endpoints
+
+`GET /api/v1/agent/healthz`
+
+- Unauthenticated agent-facing health check.
+- Returns `{ "ok": true }`.
 
 `GET /api/v1/agent/invitations`
 
