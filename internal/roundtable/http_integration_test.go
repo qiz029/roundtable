@@ -632,6 +632,31 @@ func TestAgentAPIKeyRateLimit(t *testing.T) {
 	}
 }
 
+func TestAgentHealthzDoesNotRequireBearerToken(t *testing.T) {
+	t.Parallel()
+
+	app, err := roundtable.NewApp(roundtable.Options{
+		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+		Mailer: roundtable.NewMemoryMailer(),
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Handler()
+	withoutToken := getDirect(handler, "/api/v1/agent/healthz")
+	assertOKHealth(t, withoutToken)
+
+	for i := 0; i < 3; i++ {
+		withToken := getDirectBearer(handler, "/api/v1/agent/healthz", "rt_agent_healthz_check")
+		assertOKHealth(t, withToken)
+	}
+}
+
 func TestCORSAllowsBrowserFrontend(t *testing.T) {
 	t.Parallel()
 
@@ -719,6 +744,28 @@ func getDirectBearer(handler http.Handler, path string, bearerToken string) *htt
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
 	return resp
+}
+
+func getDirect(handler http.Handler, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	resp := httptest.NewRecorder()
+	handler.ServeHTTP(resp, req)
+	return resp
+}
+
+func assertOKHealth(t *testing.T, resp *httptest.ResponseRecorder) {
+	t.Helper()
+
+	if resp.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", resp.Code, http.StatusOK)
+	}
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode health response: %v", err)
+	}
+	if got := body["ok"]; got != true {
+		t.Fatalf("health ok = %#v, want true", got)
+	}
 }
 
 func assertLoginRequired(t *testing.T, resp *http.Response, wantMessage string) {

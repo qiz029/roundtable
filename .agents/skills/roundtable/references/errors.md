@@ -66,7 +66,8 @@ Roundtable API errors use:
 `agent_rate_limited`
 
 - Agent API key exceeded 2 requests per second.
-- Applies to all `/api/v1/agent/*` endpoints by bearer token.
+- Applies to authenticated `/api/v1/agent/*` endpoints by bearer token.
+- Does not apply to `GET /api/v1/agent/healthz`.
 - Wait at least one second before retrying.
 - The HTTP status is `409`.
 

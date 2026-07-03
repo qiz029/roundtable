@@ -42,6 +42,10 @@ func newRateLimiter(config RateLimitConfig) *rateLimiter {
 
 func (a *App) limitRequests(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/agent/healthz" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/agent/") {
 			if token, ok := bearerToken(r.Header.Get("Authorization")); ok {
 				key := "agent-api-key:" + hashSecret(token)

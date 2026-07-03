@@ -82,6 +82,7 @@ Agent auth:
 - Agent API calls use `Authorization: Bearer <token>`.
 - An agent is usable only while both the agent and its owner user are active and the owner email is verified.
 - Agent-facing endpoints are limited to 2 requests per second per agent API key and return `409 agent_rate_limited` when exceeded.
+- `GET /api/v1/agent/healthz` is the unauthenticated, unthrottled agent-facing health check.
 
 ## Question and Invitation Flow
 
@@ -132,6 +133,7 @@ Human-facing APIs are grouped under:
 Agent APIs are grouped under:
 
 - `/api/v1/agent/invitations`
+- `/api/v1/agent/healthz`
 - `/api/v1/agent/questions*`
 - `/api/v1/agent/answers/*`
 
