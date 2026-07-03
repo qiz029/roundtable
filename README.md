@@ -24,7 +24,7 @@ Start the API server:
 go run ./cmd/roundtabled --addr :8080 --db ./roundtable.db
 ```
 
-Local development does not send real verification emails unless SMTP is configured. The default log mailer writes verification tokens to stderr.
+Local development does not send real verification emails unless SMTP or Mailgun is configured. The default log mailer writes verification tokens to stderr.
 
 ## Docker
 
@@ -55,17 +55,43 @@ The script builds the Docker image, starts `roundtabled`, registers and verifies
 | `ROUNDTABLE_ADDR` | `:8080` | HTTP listen address. |
 | `ROUNDTABLE_DB_PATH` | `./roundtable.db` | SQLite database path. |
 | `ROUNDTABLE_SECURE_COOKIE` | `false` | Set to `true` to mark session cookies as Secure. |
+| `ROUNDTABLE_MAILER` | `auto` | Mail delivery provider: `auto`, `log`, `smtp`, or `mailgun`. |
+| `ROUNDTABLE_MAILGUN_API_BASE` | `https://api.mailgun.net` | Mailgun API base URL. Use `https://api.eu.mailgun.net` for EU domains. |
+| `ROUNDTABLE_MAILGUN_DOMAIN` | empty | Mailgun sending domain, for example `mg.example.com`. |
+| `ROUNDTABLE_MAILGUN_API_KEY` | empty | Mailgun API key. Prefer a domain sending key when possible. |
+| `ROUNDTABLE_MAILGUN_FROM` | empty | Sender address for Mailgun verification emails. Friendly names are supported. |
 | `ROUNDTABLE_SMTP_ADDR` | empty | SMTP server address, for example `smtp.example.com:587`. |
 | `ROUNDTABLE_SMTP_FROM` | empty | Sender address for verification emails. |
 | `ROUNDTABLE_SMTP_USERNAME` | empty | Optional SMTP username. |
 | `ROUNDTABLE_SMTP_PASSWORD` | empty | Optional SMTP password. |
 | `ROUNDTABLE_PUBLIC_URL` | empty | Public base URL used in verification emails. |
 
-If SMTP is not configured, `roundtabled` uses the log mailer and prints verification tokens to stderr. In Docker Compose, read them with:
+With `ROUNDTABLE_MAILER=auto`, `roundtabled` uses Mailgun when any Mailgun config is present, then SMTP when any SMTP config is present, and otherwise the log mailer. If a provider is selected explicitly, missing required provider config fails server startup.
+
+If no mail provider is configured, `roundtabled` uses the log mailer and prints verification tokens to stderr. In Docker Compose, read them with:
 
 ```sh
 docker compose logs -f roundtabled
 ```
+
+To send verification email through Mailgun:
+
+```sh
+ROUNDTABLE_MAILER=mailgun \
+ROUNDTABLE_MAILGUN_DOMAIN=mg.example.com \
+ROUNDTABLE_MAILGUN_API_KEY="$MAILGUN_API_KEY" \
+ROUNDTABLE_MAILGUN_FROM="Roundtable <noreply@mg.example.com>" \
+ROUNDTABLE_PUBLIC_URL=http://localhost:5173 \
+docker compose up --build roundtabled
+```
+
+For a Mailgun EU sending domain, also set:
+
+```sh
+ROUNDTABLE_MAILGUN_API_BASE=https://api.eu.mailgun.net
+```
+
+Do not commit Mailgun API keys. In production, inject `ROUNDTABLE_MAILGUN_API_KEY` through the deployment platform secret or environment configuration. `ROUNDTABLE_PUBLIC_URL` should point at the Web UI origin because verification emails link to `/verify?token=...`.
 
 ## API Overview
 
