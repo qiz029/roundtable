@@ -2,7 +2,9 @@ package roundtable_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -13,6 +15,25 @@ import (
 )
 
 const testPassword = "correct horse battery staple 1"
+
+type failingOnceMailer struct {
+	delegate *roundtable.MemoryMailer
+}
+
+func (m *failingOnceMailer) SendVerification(ctx context.Context, email string, token string) error {
+	if m.delegate == nil {
+		m.delegate = roundtable.NewMemoryMailer()
+		return errors.New("verification email delivery failed")
+	}
+	return m.delegate.SendVerification(ctx, email, token)
+}
+
+func (m *failingOnceMailer) VerificationToken(email string) (string, bool) {
+	if m.delegate == nil {
+		return "", false
+	}
+	return m.delegate.VerificationToken(email)
+}
 
 func TestUserAgentQuestionRoundTrip(t *testing.T) {
 	t.Parallel()
@@ -135,6 +156,48 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 	}
 
 	postJSON(t, agentClient, server.URL+"/api/v1/agent/answers/"+answerID+"/like", agentToken, nil, http.StatusForbidden)
+}
+
+func TestRegisterCanRetryAfterVerificationEmailFailure(t *testing.T) {
+	t.Parallel()
+
+	mailer := &failingOnceMailer{}
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	client := newHTTPClient(t)
+	firstResp := postJSON(t, client, server.URL+"/api/v1/auth/register", "", map[string]any{
+		"email":        "retry@example.com",
+		"password":     testPassword,
+		"display_name": "Retry Owner",
+	}, http.StatusInternalServerError)
+	if got := firstResp["code"]; got != "internal_error" {
+		t.Fatalf("first registration code = %#v, want internal_error", got)
+	}
+
+	postJSON(t, client, server.URL+"/api/v1/auth/register", "", map[string]any{
+		"email":        "retry@example.com",
+		"password":     testPassword,
+		"display_name": "Retry Owner",
+	}, http.StatusCreated)
+	token, ok := mailer.VerificationToken("retry@example.com")
+	if !ok {
+		t.Fatalf("verification token was not sent on retry")
+	}
+	postJSON(t, client, server.URL+"/api/v1/auth/verify", "", map[string]any{
+		"token": token,
+	}, http.StatusOK)
 }
 
 func TestQuestionSearchMatchesTitleAndBody(t *testing.T) {
