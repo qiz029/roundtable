@@ -14,7 +14,7 @@ func (a *App) handleUserAnswerAction(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errNotFound("answer action not found"))
 		return
 	}
-	user, err := a.requireUser(r.Context(), r)
+	user, err := a.requireUserFor(r.Context(), r, "like answers")
 	if err != nil {
 		writeError(w, err)
 		return

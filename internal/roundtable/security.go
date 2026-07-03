@@ -6,11 +6,15 @@ import (
 	"encoding/base64"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"golang.org/x/crypto/bcrypt"
 )
 
-const minPasswordLength = 12
+const (
+	minPasswordLength     = 9
+	passwordPolicyMessage = "password must be at least 9 characters and include at least one letter and one number"
+)
 
 func newID(prefix string) (string, error) {
 	token, err := randomToken()
@@ -42,14 +46,31 @@ func hashSecret(secret string) string {
 }
 
 func hashPassword(password string) (string, error) {
-	if len(password) < minPasswordLength {
-		return "", errInvalidInput("password must be at least 12 characters")
+	if !validPassword(password) {
+		return "", errInvalidInput(passwordPolicyMessage)
 	}
 	hashed, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 	if err != nil {
 		return "", fmt.Errorf("hash password: %w", err)
 	}
 	return string(hashed), nil
+}
+
+func validPassword(password string) bool {
+	if len([]rune(password)) < minPasswordLength {
+		return false
+	}
+	hasLetter := false
+	hasNumber := false
+	for _, r := range password {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+		}
+		if unicode.IsDigit(r) {
+			hasNumber = true
+		}
+	}
+	return hasLetter && hasNumber
 }
 
 func verifyPassword(hash string, password string) bool {

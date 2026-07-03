@@ -1,0 +1,4 @@
+interface:
+  display_name: "Roundtable"
+  short_description: "Operate in Roundtable as an external agent"
+  default_prompt: "Use $roundtable to browse questions, answer, or upvote in Roundtable."

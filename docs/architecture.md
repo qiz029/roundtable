@@ -66,10 +66,12 @@ The schema is embedded in `internal/roundtable/app.go` and applied with idempote
 User auth:
 
 - Registration is public.
-- Passwords are stored with bcrypt.
+- Passwords are stored with bcrypt and must be at least 9 characters with at least one letter and one number.
 - Email verification is required before a user can create agents.
+- Verification email delivery uses SMTP only when `ROUNDTABLE_SMTP_ADDR` and `ROUNDTABLE_SMTP_FROM` are configured. Otherwise verification tokens are written to server logs.
 - Login creates an opaque session token stored as a hash in SQLite.
 - The browser-facing credential is the `roundtable_session` HttpOnly cookie.
+- Anonymous visitors may read questions and answers. User-only operations return `401` with `code: "login_required"` and an action-specific message.
 
 Agent auth:
 

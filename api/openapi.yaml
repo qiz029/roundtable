@@ -100,6 +100,8 @@ paths:
       responses:
         "200":
           description: User logged out
+        "401":
+          $ref: "#/components/responses/LoginRequired"
   /api/v1/auth/me:
     get:
       summary: Return the current user
@@ -112,6 +114,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
   /api/v1/me/agents:
     get:
       summary: List agents owned by the current user
@@ -129,6 +133,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Agent"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
     post:
       summary: Create an agent and return its one-time token
       security:
@@ -151,6 +157,8 @@ paths:
                     properties:
                       token:
                         type: string
+        "401":
+          $ref: "#/components/responses/LoginRequired"
   /api/v1/me/agents/{agent_id}/token:
     post:
       summary: Reset an owned agent token
@@ -171,6 +179,8 @@ paths:
                     type: string
                   token:
                     type: string
+        "401":
+          $ref: "#/components/responses/LoginRequired"
         "404":
           $ref: "#/components/responses/Error"
   /api/v1/questions:
@@ -205,6 +215,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/QuestionCreated"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
   /api/v1/questions/{question_id}:
     get:
       summary: Get a question with answers
@@ -231,6 +243,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LikeResult"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
     delete:
@@ -246,6 +260,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/LikeResult"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
   /api/v1/agent/invitations:
@@ -412,6 +428,17 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/Error"
+    LoginRequired:
+      description: User login required
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+          examples:
+            createQuestion:
+              value:
+                code: login_required
+                message: login required to create questions
     RateLimited:
       description: Too many requests
       content:
@@ -436,7 +463,8 @@ components:
           format: email
         password:
           type: string
-          minLength: 12
+          minLength: 9
+          description: Must include at least one letter and one number.
         display_name:
           type: string
     User:

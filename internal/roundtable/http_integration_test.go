@@ -13,6 +13,8 @@ import (
 	"github.com/qiz029/roundtable/internal/roundtable"
 )
 
+const testPassword = "correct horse battery staple 1"
+
 func TestUserAgentQuestionRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -36,7 +38,7 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 
 	postJSON(t, userClient, server.URL+"/api/v1/auth/register", "", map[string]any{
 		"email":        "owner@example.com",
-		"password":     "correct horse battery staple",
+		"password":     testPassword,
 		"display_name": "Owner",
 	}, http.StatusCreated)
 
@@ -50,7 +52,7 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 
 	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
 		"email":    "owner@example.com",
-		"password": "correct horse battery staple",
+		"password": testPassword,
 	}, http.StatusOK)
 
 	agentResp := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
@@ -153,7 +155,7 @@ func TestQuestionInvitesAtMostFiveAgents(t *testing.T) {
 	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
 	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
 		"email":    "owner@example.com",
-		"password": "correct horse battery staple",
+		"password": testPassword,
 	}, http.StatusOK)
 
 	for i := 0; i < 6; i++ {
@@ -200,7 +202,7 @@ func TestAgentTokenResetAndInvitationExpiry(t *testing.T) {
 	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
 	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
 		"email":    "owner@example.com",
-		"password": "correct horse battery staple",
+		"password": testPassword,
 	}, http.StatusOK)
 
 	agentResp := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
@@ -272,12 +274,12 @@ func TestUnverifiedUserCannotCreateAgent(t *testing.T) {
 	userClient := newHTTPClient(t)
 	postJSON(t, userClient, server.URL+"/api/v1/auth/register", "", map[string]any{
 		"email":        "unverified@example.com",
-		"password":     "correct horse battery staple",
+		"password":     testPassword,
 		"display_name": "Unverified",
 	}, http.StatusCreated)
 	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
 		"email":    "unverified@example.com",
-		"password": "correct horse battery staple",
+		"password": testPassword,
 	}, http.StatusOK)
 	postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
 		"name":         "Blocked Agent",
@@ -286,6 +288,134 @@ func TestUnverifiedUserCannotCreateAgent(t *testing.T) {
 		"capabilities": []string{"none"},
 		"is_public":    true,
 	}, http.StatusForbidden)
+}
+
+func TestRegisterPasswordPolicy(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := roundtable.NewApp(roundtable.Options{
+		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+		Mailer: mailer,
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	wantMessage := "password must be at least 9 characters and include at least one letter and one number"
+	tests := []struct {
+		name     string
+		email    string
+		password string
+	}{
+		{
+			name:     "too short",
+			email:    "short@example.com",
+			password: "abc12345",
+		},
+		{
+			name:     "missing number",
+			email:    "nonumber@example.com",
+			password: "correct horse battery",
+		},
+		{
+			name:     "missing letter",
+			email:    "noletter@example.com",
+			password: "123456789",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			resp := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/auth/register", "", map[string]any{
+				"email":        tt.email,
+				"password":     tt.password,
+				"display_name": "Blocked",
+			}, http.StatusBadRequest)
+			if got := resp["code"]; got != "invalid_input" {
+				t.Fatalf("code = %#v, want invalid_input", got)
+			}
+			if got := resp["message"]; got != wantMessage {
+				t.Fatalf("message = %#v, want %q", got, wantMessage)
+			}
+		})
+	}
+
+	postJSON(t, newHTTPClient(t), server.URL+"/api/v1/auth/register", "", map[string]any{
+		"email":        "valid@example.com",
+		"password":     "abc123456",
+		"display_name": "Valid",
+	}, http.StatusCreated)
+}
+
+func TestAnonymousUserCanOnlyReadQuestionsAndAnswers(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := roundtable.NewApp(roundtable.Options{
+		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
+	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "owner@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+	agentResp := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Public Answer Agent",
+		"description":  "Creates an answer for anonymous read testing.",
+		"tags":         []string{"public"},
+		"capabilities": []string{"answering"},
+		"is_public":    true,
+	}, http.StatusCreated)
+	agentToken := stringField(t, agentResp, "token")
+	questionResp := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Can anonymous visitors read questions?",
+		"body":  "Anonymous visitors should only be able to read questions and answers.",
+		"tags":  []string{"public"},
+	}, http.StatusCreated)
+	questionID := stringField(t, questionResp, "id")
+	answerResp := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", agentToken, map[string]any{
+		"body": "Anonymous visitors can read this answer, but cannot vote without logging in.",
+	}, http.StatusCreated)
+	answerID := stringField(t, answerResp, "id")
+
+	anonymousClient := newHTTPClient(t)
+	questions := getJSON(t, anonymousClient, server.URL+"/api/v1/questions", "", http.StatusOK)
+	if got := len(listField(t, questions, "items")); got != 1 {
+		t.Fatalf("anonymous question list count = %d, want 1", got)
+	}
+	detail := getJSON(t, anonymousClient, server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK)
+	if got := len(listField(t, detail, "answers")); got != 1 {
+		t.Fatalf("anonymous answer count = %d, want 1", got)
+	}
+
+	assertLoginRequired(t, getRaw(t, anonymousClient, server.URL+"/api/v1/auth/me"), "login required to view current user")
+	assertLoginRequired(t, postRawJSON(t, anonymousClient, server.URL+"/api/v1/auth/logout", nil), "login required to log out")
+	assertLoginRequired(t, postRawJSON(t, anonymousClient, server.URL+"/api/v1/questions", map[string]any{
+		"title": "Blocked",
+		"body":  "Anonymous users cannot create questions.",
+	}), "login required to create questions")
+	assertLoginRequired(t, getRaw(t, anonymousClient, server.URL+"/api/v1/me/agents"), "login required to manage agents")
+	assertLoginRequired(t, postRawJSON(t, anonymousClient, server.URL+"/api/v1/me/agents", map[string]any{
+		"name": "Blocked Agent",
+	}), "login required to manage agents")
+	assertLoginRequired(t, postRawJSON(t, anonymousClient, server.URL+"/api/v1/answers/"+answerID+"/like", nil), "login required to like answers")
 }
 
 func TestAuthRateLimit(t *testing.T) {
@@ -309,7 +439,7 @@ func TestAuthRateLimit(t *testing.T) {
 	handler := app.Handler()
 	body := map[string]any{
 		"email":    "missing@example.com",
-		"password": "correct horse battery staple",
+		"password": testPassword,
 	}
 	for i := 0; i < 2; i++ {
 		resp := postDirectJSON(t, handler, "/api/v1/auth/login", body)
@@ -378,7 +508,7 @@ func registerAndVerifyUser(t *testing.T, client *http.Client, apiURL string, mai
 
 	postJSON(t, client, apiURL+"/api/v1/auth/register", "", map[string]any{
 		"email":        email,
-		"password":     "correct horse battery staple",
+		"password":     testPassword,
 		"display_name": "Owner",
 	}, http.StatusCreated)
 	token, ok := mailer.VerificationToken(email)
@@ -401,6 +531,62 @@ func postDirectJSON(t *testing.T, handler http.Handler, path string, body map[st
 	req.Header.Set("Content-Type", "application/json")
 	resp := httptest.NewRecorder()
 	handler.ServeHTTP(resp, req)
+	return resp
+}
+
+func assertLoginRequired(t *testing.T, resp *http.Response, wantMessage string) {
+	t.Helper()
+	defer resp.Body.Close()
+
+	var decoded map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d, body = %#v", resp.StatusCode, http.StatusUnauthorized, decoded)
+	}
+	if got := decoded["code"]; got != "login_required" {
+		t.Fatalf("code = %#v, want login_required", got)
+	}
+	if got := decoded["message"]; got != wantMessage {
+		t.Fatalf("message = %#v, want %q", got, wantMessage)
+	}
+}
+
+func getRaw(t *testing.T, client *http.Client, url string) *http.Response {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("get %s: %v", url, err)
+	}
+	return resp
+}
+
+func postRawJSON(t *testing.T, client *http.Client, url string, body map[string]any) *http.Response {
+	t.Helper()
+
+	var payload []byte
+	if body != nil {
+		var err error
+		payload, err = json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post %s: %v", url, err)
+	}
 	return resp
 }
 
