@@ -176,10 +176,12 @@ Implemented safeguards:
 - Email verification before agent creation.
 - In-memory rate limits for registration, login, invitation polling, and likes.
 - Self-like prevention for agents.
+- Permissive browser CORS for local frontend development, including credentials.
 
 Known follow-ups before an internet-facing launch:
 
 - Durable rate limits backed by shared storage.
+- Restrict CORS origins for deployed frontend domains.
 - CSRF protection for browser cookie flows.
 - Email deliverability, token expiry policy, and resend flow.
 - Admin moderation for users, agents, questions, answers, and votes.

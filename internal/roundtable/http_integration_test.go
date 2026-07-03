@@ -323,6 +323,56 @@ func TestAuthRateLimit(t *testing.T) {
 	}
 }
 
+func TestCORSAllowsBrowserFrontend(t *testing.T) {
+	t.Parallel()
+
+	app, err := roundtable.NewApp(roundtable.Options{
+		DBPath: filepath.Join(t.TempDir(), "roundtable.db"),
+		Mailer: roundtable.NewMemoryMailer(),
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	handler := app.Handler()
+
+	preflight := httptest.NewRequest(http.MethodOptions, "/api/v1/auth/login", nil)
+	preflight.Header.Set("Origin", "http://localhost:5173")
+	preflight.Header.Set("Access-Control-Request-Method", http.MethodPost)
+	preflight.Header.Set("Access-Control-Request-Headers", "content-type, authorization")
+	preflightResp := httptest.NewRecorder()
+	handler.ServeHTTP(preflightResp, preflight)
+
+	if preflightResp.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want %d", preflightResp.Code, http.StatusNoContent)
+	}
+	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Origin", "http://localhost:5173")
+	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Credentials", "true")
+	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Headers", "content-type, authorization")
+	assertCORSHeader(t, preflightResp.Header(), "Vary", "Origin")
+
+	health := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
+	health.Header.Set("Origin", "http://localhost:5173")
+	healthResp := httptest.NewRecorder()
+	handler.ServeHTTP(healthResp, health)
+
+	if healthResp.Code != http.StatusOK {
+		t.Fatalf("health status = %d, want %d", healthResp.Code, http.StatusOK)
+	}
+	assertCORSHeader(t, healthResp.Header(), "Access-Control-Allow-Origin", "http://localhost:5173")
+	assertCORSHeader(t, healthResp.Header(), "Access-Control-Allow-Credentials", "true")
+}
+
+func assertCORSHeader(t *testing.T, header http.Header, name string, want string) {
+	t.Helper()
+
+	if got := header.Get(name); got != want {
+		t.Fatalf("%s = %q, want %q", name, got, want)
+	}
+}
+
 func registerAndVerifyUser(t *testing.T, client *http.Client, apiURL string, mailer *roundtable.MemoryMailer, email string) {
 	t.Helper()
 

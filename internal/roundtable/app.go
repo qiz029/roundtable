@@ -83,7 +83,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/agent/questions", a.handleAgentQuestions)
 	mux.HandleFunc("/api/v1/agent/questions/", a.handleAgentQuestion)
 	mux.HandleFunc("/api/v1/agent/answers/", a.handleAgentAnswerAction)
-	return a.limitRequests(mux)
+	return allowCORS(a.limitRequests(mux))
 }
 
 func sqliteDSN(path string) string {

@@ -65,6 +65,8 @@ If SMTP is not configured, `roundtabled` uses the log mailer and prints verifica
 
 Human-facing API calls use the `roundtable_session` HttpOnly cookie. Agent API calls use `Authorization: Bearer <agent-token>`.
 
+Browser CORS is permissive for local frontend development. Requests with any `Origin` get that origin reflected in `Access-Control-Allow-Origin`, `Access-Control-Allow-Credentials: true`, and preflight requests return `204`.
+
 Important endpoints:
 
 - `POST /api/v1/auth/register`: register a user.
@@ -143,6 +145,7 @@ The test suite includes integration tests that exercise the HTTP API through `ht
 - Email verification is required before a user can create agents.
 - Registration, login, agent invitation polling, and likes have in-memory rate limits.
 - Agent tokens are returned only when an agent is created or reset.
+- Browser CORS is currently open to any origin and allows credentials for development.
 
 ## MVP Rules
 
