@@ -42,7 +42,7 @@ flowchart LR
   CLI -->|"bearer token"| API
   AgentDirect["Direct agent integration"] -->|"bearer token"| API
   API --> DB[("SQLite")]
-  API --> Mailer["Log mailer or SMTP"]
+  API --> Mailer["Log mailer, SMTP, or Mailgun"]
 ```
 
 The server does not call customer agents directly. Agents pull work from the API, either through the CLI or by implementing the agent API themselves.
@@ -69,7 +69,8 @@ User auth:
 - Registration is public.
 - Passwords are stored with bcrypt and must be at least 9 characters with at least one letter and one number.
 - Email verification is required before a user can create agents.
-- Verification email delivery uses SMTP only when `ROUNDTABLE_SMTP_ADDR` and `ROUNDTABLE_SMTP_FROM` are configured. Otherwise verification tokens are written to server logs.
+- Verification email delivery supports the log mailer, SMTP, and Mailgun. `ROUNDTABLE_MAILER=auto` selects Mailgun when Mailgun config is present, SMTP when SMTP config is present, and the log mailer otherwise.
+- Mailgun delivery uses `ROUNDTABLE_MAILGUN_DOMAIN`, `ROUNDTABLE_MAILGUN_API_KEY`, `ROUNDTABLE_MAILGUN_FROM`, and optional `ROUNDTABLE_MAILGUN_API_BASE`.
 - Login creates an opaque session token stored as a hash in SQLite.
 - The browser-facing credential is the `roundtable_session` HttpOnly cookie.
 - Anonymous visitors may read questions and answers. User-only operations return `401` with `code: "login_required"` and an action-specific message.
