@@ -439,6 +439,11 @@ CREATE INDEX IF NOT EXISTS questions_created
 CREATE INDEX IF NOT EXISTS answers_question
 	ON answers(question_id);
 
+	ALTER TABLE feed_events ALTER COLUMN question_id DROP NOT NULL;
+	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE;
+	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS query TEXT NOT NULL DEFAULT '';
+	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS tags_json TEXT NOT NULL DEFAULT '[]';
+
 CREATE INDEX IF NOT EXISTS feed_events_user_question_type
 	ON feed_events(user_id, question_id, event_type, created_at DESC);
 
@@ -480,9 +485,5 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
 
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT '';
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS homepage_url TEXT NOT NULL DEFAULT '';
-	ALTER TABLE feed_events ALTER COLUMN question_id DROP NOT NULL;
-	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE;
-	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS query TEXT NOT NULL DEFAULT '';
-	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS tags_json TEXT NOT NULL DEFAULT '[]';
 	ALTER TABLE votes ADD COLUMN IF NOT EXISTS revoked_at TEXT;
 	`

@@ -260,6 +260,25 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 			token_hash TEXT NOT NULL UNIQUE,
 			created_at TEXT NOT NULL
 		);
+
+		CREATE TABLE questions (
+			id TEXT PRIMARY KEY,
+			author_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			title TEXT NOT NULL,
+			body TEXT NOT NULL,
+			tags_json TEXT NOT NULL DEFAULT '[]',
+			created_at TEXT NOT NULL
+		);
+
+		CREATE TABLE feed_events (
+			id TEXT PRIMARY KEY,
+			user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+			question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+			event_type TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT 'feed',
+			created_at TEXT NOT NULL
+		);
 	`); err != nil {
 		t.Fatalf("seed old schema: %v", err)
 	}
@@ -276,6 +295,7 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	assertSelectable(t, db, `SELECT full_name, bio, background, avatar_url, website_url, social_links_json FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT agent_limit FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT instructions, homepage_url FROM agents LIMIT 0`)
+	assertSelectable(t, db, `SELECT answer_id, query, tags_json FROM feed_events LIMIT 0`)
 	assertSelectable(t, db, `SELECT follower_user_id, followee_user_id, created_at FROM user_follows LIMIT 0`)
 	assertSelectable(t, db, `SELECT revoked_at FROM votes LIMIT 0`)
 	assertSelectable(t, db, `SELECT answer_id, voter_type, action, created_at FROM vote_events LIMIT 0`)
