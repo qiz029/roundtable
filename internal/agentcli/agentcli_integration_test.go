@@ -41,6 +41,74 @@ func TestVersionCommandPrintsBuildInfo(t *testing.T) {
 	}
 }
 
+func TestUpdateCommandDryRunPrintsInstallerCommand(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	if err := agentcli.Run(context.Background(), []string{
+		"update",
+		"--version", "1.2.3",
+		"--install-dir", "/tmp/round table/bin",
+		"--dry-run",
+	}, agentcli.Options{
+		Stdout: &stdout,
+		Stderr: &bytes.Buffer{},
+	}); err != nil {
+		t.Fatalf("update dry-run: %v", err)
+	}
+
+	output := stdout.String()
+	for _, want := range []string{
+		"curl -fsSL https://github.com/qiz029/roundtable/releases/latest/download/install.sh",
+		"-o \"$tmp\"",
+		"ROUNDTABLE_AGENT_VERSION='1.2.3'",
+		"ROUNDTABLE_INSTALL_DIR='/tmp/round table/bin'",
+		"bash \"$tmp\"",
+	} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("update dry-run output = %q, missing %q", output, want)
+		}
+	}
+}
+
+func TestUpdateCommandRunsInstallerCommand(t *testing.T) {
+	t.Parallel()
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var command string
+	err := agentcli.Run(context.Background(), []string{"update"}, agentcli.Options{
+		Stdout: &stdout,
+		Stderr: &stderr,
+		Exec: func(_ context.Context, got string, stdin []byte) ([]byte, []byte, error) {
+			command = got
+			if len(stdin) != 0 {
+				t.Fatalf("update stdin = %q, want empty", string(stdin))
+			}
+			return []byte("updated\n"), []byte("installer warning\n"), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("update command: %v", err)
+	}
+	for _, want := range []string{
+		"tmp=\"$(mktemp)\"",
+		"curl -fsSL https://github.com/qiz029/roundtable/releases/latest/download/install.sh -o \"$tmp\"",
+		"bash \"$tmp\"",
+		"rm -f \"$tmp\"",
+	} {
+		if !strings.Contains(command, want) {
+			t.Fatalf("update command = %q, missing %q", command, want)
+		}
+	}
+	if got := stdout.String(); got != "updated\n" {
+		t.Fatalf("stdout = %q, want installer stdout", got)
+	}
+	if got := stderr.String(); got != "installer warning\n" {
+		t.Fatalf("stderr = %q, want installer stderr", got)
+	}
+}
+
 func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 	t.Parallel()
 
@@ -148,6 +216,74 @@ func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 	}
 }
 
+func TestFeedListUsesAgentFeed(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerVerifiedUser(t, userClient, server.URL, mailer)
+	loginUser(t, userClient, server.URL)
+	agentToken := createAgent(t, userClient, server.URL)
+	matchedQuestionID := createQuestion(t, userClient, server.URL)
+	now = now.Add(time.Minute)
+	recentQuestionID := createQuestionWithTags(t, userClient, server.URL,
+		"How should office snacks be organized?",
+		"This is newer but not related to automation.",
+		[]string{"office"},
+	)
+
+	var stdout bytes.Buffer
+	opts := agentcli.Options{
+		HomeDir: t.TempDir(),
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	}
+	if err := agentcli.Run(context.Background(), []string{
+		"login",
+		"--api-url", server.URL,
+		"--token", agentToken,
+	}, opts); err != nil {
+		t.Fatalf("agent login: %v", err)
+	}
+
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{"feed", "list"}, opts); err != nil {
+		t.Fatalf("feed list: %v", err)
+	}
+	var feed map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &feed); err != nil {
+		t.Fatalf("decode feed: %v", err)
+	}
+	items := listField(t, feed, "items")
+	if len(items) != 2 {
+		t.Fatalf("feed item count = %d, want 2", len(items))
+	}
+	if got := stringField(t, items[0].(map[string]any), "id"); got != matchedQuestionID {
+		t.Fatalf("feed first id = %q, want tag-matched question", got)
+	}
+	if got := stringField(t, items[1].(map[string]any), "id"); got != recentQuestionID {
+		t.Fatalf("feed second id = %q, want recent unrelated question", got)
+	}
+}
+
 func registerVerifiedUser(t *testing.T, client *http.Client, apiURL string, mailer *roundtable.MemoryMailer) {
 	t.Helper()
 
@@ -188,10 +324,20 @@ func createAgent(t *testing.T, client *http.Client, apiURL string) string {
 func createQuestion(t *testing.T, client *http.Client, apiURL string) string {
 	t.Helper()
 
+	return createQuestionWithTags(t, client, apiURL,
+		"Can an agent CLI answer invitations?",
+		"The CLI should feed JSON to an external command.",
+		[]string{"cli"},
+	)
+}
+
+func createQuestionWithTags(t *testing.T, client *http.Client, apiURL string, title string, body string, tags []string) string {
+	t.Helper()
+
 	resp := postJSON(t, client, apiURL+"/api/v1/questions", "", map[string]any{
-		"title": "Can an agent CLI answer invitations?",
-		"body":  "The CLI should feed JSON to an external command.",
-		"tags":  []string{"cli"},
+		"title": title,
+		"body":  body,
+		"tags":  tags,
 	}, http.StatusCreated)
 	return stringField(t, resp, "id")
 }

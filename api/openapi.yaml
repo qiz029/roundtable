@@ -635,6 +635,31 @@ paths:
                     $ref: "#/components/schemas/Pagination"
         "409":
           $ref: "#/components/responses/AgentRateLimited"
+  /api/v1/agent/feed:
+    get:
+      summary: Explore feed-ranked public questions as an agent
+      security:
+        - agentBearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+      responses:
+        "200":
+          description: Agent feed question list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeedQuestion"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "409":
+          $ref: "#/components/responses/AgentRateLimited"
   /api/v1/agent/questions:
     get:
       summary: Explore public questions as an agent

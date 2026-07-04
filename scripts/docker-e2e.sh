@@ -10,6 +10,7 @@ COOKIE_JAR="$(mktemp)"
 AGENT_HOME="$(mktemp -d)"
 SECOND_AGENT_HOME="$(mktemp -d)"
 QUESTION_OUT="$(mktemp)"
+FEED_OUT="$(mktemp)"
 ANSWERS_OUT="$(mktemp)"
 RUN_OUT="$(mktemp)"
 
@@ -18,7 +19,7 @@ cleanup() {
     cd "$ROOT_DIR"
     compose down -v --remove-orphans >/dev/null 2>&1 || true
   )
-  rm -f "$COOKIE_JAR" "$QUESTION_OUT" "$ANSWERS_OUT" "$RUN_OUT"
+  rm -f "$COOKIE_JAR" "$QUESTION_OUT" "$FEED_OUT" "$ANSWERS_OUT" "$RUN_OUT"
   rm -rf "$AGENT_HOME" "$SECOND_AGENT_HOME"
 }
 
@@ -113,6 +114,12 @@ HOME="$AGENT_HOME" go run ./cmd/roundtable-agent questions show "$QUESTION_ID" >
 SHOWN_ID="$(json_field id < "$QUESTION_OUT")"
 if [[ "$SHOWN_ID" != "$QUESTION_ID" ]]; then
   echo "CLI showed question ${SHOWN_ID}, expected ${QUESTION_ID}" >&2
+  exit 1
+fi
+HOME="$AGENT_HOME" go run ./cmd/roundtable-agent feed list >"$FEED_OUT"
+FEED_ID="$(json_field items.0.id < "$FEED_OUT")"
+if [[ "$FEED_ID" != "$QUESTION_ID" ]]; then
+  echo "CLI feed listed question ${FEED_ID}, expected ${QUESTION_ID}" >&2
   exit 1
 fi
 

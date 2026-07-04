@@ -108,6 +108,32 @@ func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *App) handleAgentFeed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, errMethodNotAllowed())
+		return
+	}
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	agent, err := a.requireAgent(r.Context(), r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	signals, err := a.feedSignalsForAgent(r.Context(), agent.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := a.writeFeed(w, r, page, currentUser{ID: agent.OwnerID}, true, signals, agent.ID); err != nil {
+		writeError(w, err)
+		return
+	}
+}
+
 func (a *App) listFeed(w http.ResponseWriter, r *http.Request) {
 	page, err := paginationFromRequest(r)
 	if err != nil {
@@ -121,20 +147,27 @@ func (a *App) listFeed(w http.ResponseWriter, r *http.Request) {
 	}
 
 	signals := feedSignals{Terms: map[string]bool{}}
-	userID := ""
 	if hasUser {
-		userID = user.ID
 		signals, err = a.feedSignalsForUser(r.Context(), user.ID)
 		if err != nil {
 			writeError(w, err)
 			return
 		}
 	}
-
-	questions, err := a.feedQuestions(r.Context(), userID)
-	if err != nil {
+	if err := a.writeFeed(w, r, page, user, hasUser, signals, ""); err != nil {
 		writeError(w, err)
 		return
+	}
+}
+
+func (a *App) writeFeed(w http.ResponseWriter, r *http.Request, page paginationParams, user currentUser, hasUser bool, signals feedSignals, agentID string) error {
+	userID := ""
+	if hasUser {
+		userID = user.ID
+	}
+	questions, err := a.feedQuestions(r.Context(), userID, agentID)
+	if err != nil {
+		return err
 	}
 
 	type scoredQuestion struct {
@@ -182,9 +215,10 @@ func (a *App) listFeed(w http.ResponseWriter, r *http.Request) {
 		"items":      items,
 		"pagination": paginationResponse(page, len(items), hasMore),
 	})
+	return nil
 }
 
-func (a *App) feedQuestions(ctx context.Context, userID string) ([]feedQuestion, error) {
+func (a *App) feedQuestions(ctx context.Context, userID string, agentID string) ([]feedQuestion, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT q.id, q.title, q.body, q.tags_json, q.created_at, q.author_user_id, u.display_name,
 			(SELECT COUNT(*) FROM answers ans WHERE ans.question_id = q.id) AS answer_count,
@@ -207,8 +241,12 @@ func (a *App) feedQuestions(ctx context.Context, userID string) ([]feedQuestion,
 		FROM questions q
 		JOIN users u ON u.id = q.author_user_id
 		WHERE u.status = 'active'
+			AND ($2 = '' OR NOT EXISTS (
+				SELECT 1 FROM answers own_ans
+				WHERE own_ans.question_id = q.id AND own_ans.agent_id = $2
+			))
 		ORDER BY q.created_at DESC
-	`, userID)
+	`, userID, agentID)
 	if err != nil {
 		return nil, err
 	}
@@ -249,6 +287,23 @@ func (a *App) feedSignalsForUser(ctx context.Context, userID string) (feedSignal
 		addFeedTerms(signals.Terms, decodeStringList(capabilitiesRaw))
 	}
 	return signals, rows.Err()
+}
+
+func (a *App) feedSignalsForAgent(ctx context.Context, agentID string) (feedSignals, error) {
+	row := a.db.QueryRowContext(ctx, `
+		SELECT tags_json, capabilities_json
+		FROM agents
+		WHERE id = $1 AND status = 'active'
+	`, agentID)
+
+	var tagsRaw, capabilitiesRaw string
+	if err := row.Scan(&tagsRaw, &capabilitiesRaw); err != nil {
+		return feedSignals{}, err
+	}
+	signals := feedSignals{Terms: map[string]bool{}}
+	addFeedTerms(signals.Terms, decodeStringList(tagsRaw))
+	addFeedTerms(signals.Terms, decodeStringList(capabilitiesRaw))
+	return signals, nil
 }
 
 func scoreFeedQuestion(question feedQuestion, user currentUser, hasUser bool, signals feedSignals) (int, []string) {
