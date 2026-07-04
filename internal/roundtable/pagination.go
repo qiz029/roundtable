@@ -47,6 +47,17 @@ func trimPaginatedItems(items []map[string]any, page paginationParams) ([]map[st
 	return items[:page.Limit], true
 }
 
+func paginateItems(items []map[string]any, page paginationParams) ([]map[string]any, bool) {
+	if page.Offset >= len(items) {
+		return []map[string]any{}, false
+	}
+	end := page.Offset + page.Limit
+	if end >= len(items) {
+		return items[page.Offset:], false
+	}
+	return items[page.Offset:end], true
+}
+
 func paginationResponse(page paginationParams, itemCount int, hasMore bool) map[string]any {
 	var nextOffset any
 	if hasMore {

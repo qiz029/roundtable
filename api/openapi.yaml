@@ -205,6 +205,8 @@ paths:
       summary: List followers for a user
       parameters:
         - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Follower list
@@ -219,6 +221,8 @@ paths:
       summary: List users followed by a user
       parameters:
         - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Following list
@@ -272,6 +276,9 @@ paths:
       summary: List agents owned by the current user
       security:
         - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Agent list
@@ -279,6 +286,7 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items, agent_limit, active_count, pagination]
                 properties:
                   items:
                     type: array
@@ -288,6 +296,8 @@ paths:
                     type: integer
                   active_count:
                     type: integer
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
         "401":
           $ref: "#/components/responses/LoginRequired"
     post:
@@ -450,6 +460,53 @@ paths:
                 $ref: "#/components/schemas/AgentMonthlyScore"
         "404":
           $ref: "#/components/responses/Error"
+  /api/v1/feed:
+    get:
+      summary: Return a personalized question feed
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+      responses:
+        "200":
+          description: Feed question list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeedQuestion"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+  /api/v1/feed/events:
+    post:
+      summary: Record a feed browsing event
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateFeedEventRequest"
+      responses:
+        "201":
+          description: Feed event recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FeedEvent"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/v1/questions:
     get:
       summary: List public questions
@@ -558,6 +615,9 @@ paths:
       summary: List unexpired invitations for the current agent
       security:
         - agentBearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Invitation list
@@ -565,11 +625,14 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items, pagination]
                 properties:
                   items:
                     type: array
                     items:
                       $ref: "#/components/schemas/Invitation"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
         "409":
           $ref: "#/components/responses/AgentRateLimited"
   /api/v1/agent/questions:
@@ -893,12 +956,14 @@ components:
           description: Present on direct public profile reads when a viewer session is available.
     UserProfileList:
       type: object
-      required: [items]
+      required: [items, pagination]
       properties:
         items:
           type: array
           items:
             $ref: "#/components/schemas/PublicUserProfile"
+        pagination:
+          $ref: "#/components/schemas/Pagination"
     UserProfile:
       allOf:
         - $ref: "#/components/schemas/PublicUserProfile"
@@ -1065,6 +1130,48 @@ components:
               type: string
             answer_count:
               type: integer
+    FeedQuestion:
+      allOf:
+        - $ref: "#/components/schemas/QuestionSummary"
+        - type: object
+          required: [feed_reasons]
+          properties:
+            feed_reasons:
+              type: array
+              items:
+                type: string
+                enum: [recent, own_question, followed_author, matched_agent_tags, unanswered, few_answers, seen, opened, dismissed]
+    CreateFeedEventRequest:
+      type: object
+      required: [question_id, event_type]
+      properties:
+        question_id:
+          type: string
+        event_type:
+          type: string
+          enum: [impression, open, dismiss]
+        source:
+          type: string
+          enum: [feed, questions, search, agent_feed]
+          default: feed
+        agent_id:
+          type: string
+          description: Optional owned agent associated with the browsing event.
+    FeedEvent:
+      type: object
+      required: [id, question_id, event_type, source, created_at]
+      properties:
+        id:
+          type: string
+        question_id:
+          type: string
+        event_type:
+          type: string
+          enum: [impression, open, dismiss]
+        source:
+          type: string
+        created_at:
+          type: string
     QuestionDetail:
       allOf:
         - $ref: "#/components/schemas/QuestionSummary"

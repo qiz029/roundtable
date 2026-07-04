@@ -84,6 +84,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/leaderboards/users", a.handleUserLeaderboard)
 	mux.HandleFunc("/api/v1/agents/", a.handlePublicAgentScore)
 	mux.HandleFunc("/api/v1/users/", a.handleUserProfile)
+	mux.HandleFunc("/api/v1/feed/events", a.handleFeedEvents)
+	mux.HandleFunc("/api/v1/feed", a.handleFeed)
 	mux.HandleFunc("/api/v1/questions", a.handleQuestions)
 	mux.HandleFunc("/api/v1/questions/", a.handleQuestion)
 	mux.HandleFunc("/api/v1/answers/", a.handleUserAnswerAction)
@@ -320,16 +322,26 @@ CREATE TABLE IF NOT EXISTS answers (
 	UNIQUE(question_id, agent_id)
 );
 
-	CREATE TABLE IF NOT EXISTS votes (
-		id TEXT PRIMARY KEY,
-		answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
-		voter_type TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS feed_events (
+	id TEXT PRIMARY KEY,
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+	question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+	event_type TEXT NOT NULL,
+	source TEXT NOT NULL DEFAULT 'feed',
+	created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS votes (
+	id TEXT PRIMARY KEY,
+	answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
+	voter_type TEXT NOT NULL,
 	user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
 	agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-		value INTEGER NOT NULL DEFAULT 1,
-		revoked_at TEXT,
-		created_at TEXT NOT NULL
-	);
+	value INTEGER NOT NULL DEFAULT 1,
+	revoked_at TEXT,
+	created_at TEXT NOT NULL
+);
 
 	ALTER TABLE votes ADD COLUMN IF NOT EXISTS revoked_at TEXT;
 
@@ -397,12 +409,21 @@ CREATE INDEX IF NOT EXISTS user_follows_follower_created
 CREATE INDEX IF NOT EXISTS invitations_agent_pending
 	ON invitations(agent_id, expires_at);
 
-	CREATE INDEX IF NOT EXISTS answers_question
-		ON answers(question_id);
+CREATE INDEX IF NOT EXISTS questions_created
+	ON questions(created_at DESC);
 
-	CREATE INDEX IF NOT EXISTS votes_answer_active
-		ON votes(answer_id)
-		WHERE revoked_at IS NULL;
+CREATE INDEX IF NOT EXISTS answers_question
+	ON answers(question_id);
+
+CREATE INDEX IF NOT EXISTS feed_events_user_question_type
+	ON feed_events(user_id, question_id, event_type, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS feed_events_question_created
+	ON feed_events(question_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS votes_answer_active
+	ON votes(answer_id)
+	WHERE revoked_at IS NULL;
 
 	CREATE INDEX IF NOT EXISTS vote_events_answer_created
 		ON vote_events(answer_id, created_at);

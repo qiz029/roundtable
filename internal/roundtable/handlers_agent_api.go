@@ -14,6 +14,11 @@ func (a *App) handleAgentInvitations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, errMethodNotAllowed())
 		return
 	}
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	agent, err := a.requireAgent(r.Context(), r)
 	if err != nil {
 		writeError(w, err)
@@ -33,7 +38,8 @@ func (a *App) handleAgentInvitations(w http.ResponseWriter, r *http.Request) {
 				WHERE ans.question_id = inv.question_id AND ans.agent_id = inv.agent_id
 			)
 		ORDER BY inv.created_at ASC
-	`, agent.ID, a.now().UTC().Format(time.RFC3339Nano))
+		LIMIT $3 OFFSET $4
+	`, agent.ID, a.now().UTC().Format(time.RFC3339Nano), page.Limit+1, page.Offset)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -61,7 +67,15 @@ func (a *App) handleAgentInvitations(w http.ResponseWriter, r *http.Request) {
 			},
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	if err := rows.Err(); err != nil {
+		writeError(w, err)
+		return
+	}
+	items, hasMore := trimPaginatedItems(items, page)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      items,
+		"pagination": paginationResponse(page, len(items), hasMore),
+	})
 }
 
 func (a *App) handleAgentQuestions(w http.ResponseWriter, r *http.Request) {

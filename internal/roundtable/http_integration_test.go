@@ -111,6 +111,7 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("invitation count = %d, want 1", len(items))
 	}
+	assertPagination(t, invitations, 100, 0, false, 0)
 	invitation := items[0].(map[string]any)
 	invitationID := stringField(t, invitation, "id")
 	question := mapField(t, invitation, "question")
@@ -423,6 +424,7 @@ func TestUserFollowFlow(t *testing.T) {
 	if len(followerItems) != 1 {
 		t.Fatalf("followers count = %d, want 1", len(followerItems))
 	}
+	assertPagination(t, followers, 100, 0, false, 0)
 	if got := stringField(t, followerItems[0].(map[string]any), "id"); got != followerUserID {
 		t.Fatalf("followers[0].id = %q, want %q", got, followerUserID)
 	}
@@ -432,6 +434,7 @@ func TestUserFollowFlow(t *testing.T) {
 	if len(followingItems) != 1 {
 		t.Fatalf("following count = %d, want 1", len(followingItems))
 	}
+	assertPagination(t, following, 100, 0, false, 0)
 	if got := stringField(t, followingItems[0].(map[string]any), "id"); got != targetUserID {
 		t.Fatalf("following[0].id = %q, want %q", got, targetUserID)
 	}
@@ -534,6 +537,7 @@ func TestOwnedAgentProfileGetAndPatch(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("agent list count = %d, want 1", len(items))
 	}
+	assertPagination(t, list, 100, 0, false, 0)
 	listed := items[0].(map[string]any)
 	if got := stringField(t, listed, "instructions"); got != "Updated private instructions." {
 		t.Fatalf("listed instructions = %q", got)
@@ -915,6 +919,143 @@ func TestQuestionListPagination(t *testing.T) {
 	if got := invalid["code"]; got != "invalid_input" {
 		t.Fatalf("invalid limit code = %#v, want invalid_input", got)
 	}
+}
+
+func TestFeedPersonalizesQuestionsWithPagination(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	viewerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, viewerClient, server.URL, mailer, "feed-viewer@example.com", "Feed Viewer")
+	postJSON(t, viewerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "ML Review Agent",
+		"description":  "Reviews model evaluation questions.",
+		"tags":         []string{"ml"},
+		"capabilities": []string{"evaluation"},
+		"is_public":    true,
+	}, http.StatusCreated)
+
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "feed-asker@example.com", "Feed Asker")
+	matched := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should we compare ML evaluation results?",
+		"body":  "We need a review of model benchmark tradeoffs.",
+		"tags":  []string{"ml"},
+	}, http.StatusCreated)
+	now = now.Add(time.Minute)
+	recent := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should we organize office snacks?",
+		"body":  "This is newer but unrelated to the viewer agent.",
+		"tags":  []string{"office"},
+	}, http.StatusCreated)
+
+	anonymousFeed := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/feed?limit=1", "", http.StatusOK)
+	anonymousItems := listField(t, anonymousFeed, "items")
+	if got := stringField(t, anonymousItems[0].(map[string]any), "id"); got != stringField(t, recent, "id") {
+		t.Fatalf("anonymous feed first id = %q, want newest question", got)
+	}
+	assertPagination(t, anonymousFeed, 1, 0, true, 1)
+
+	personalizedFeed := getJSON(t, viewerClient, server.URL+"/api/v1/feed?limit=1", "", http.StatusOK)
+	personalizedItems := listField(t, personalizedFeed, "items")
+	if got := stringField(t, personalizedItems[0].(map[string]any), "id"); got != stringField(t, matched, "id") {
+		t.Fatalf("personalized feed first id = %q, want agent-tag match", got)
+	}
+	assertPagination(t, personalizedFeed, 1, 0, true, 1)
+
+	secondPage := getJSON(t, viewerClient, server.URL+"/api/v1/feed?limit=1&offset=1", "", http.StatusOK)
+	secondItems := listField(t, secondPage, "items")
+	if got := stringField(t, secondItems[0].(map[string]any), "id"); got != stringField(t, recent, "id") {
+		t.Fatalf("personalized feed second id = %q, want recent unrelated question", got)
+	}
+	assertPagination(t, secondPage, 1, 1, false, 0)
+}
+
+func TestFeedEventsDemoteViewedQuestions(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	viewerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, viewerClient, server.URL, mailer, "feed-history-viewer@example.com", "Feed History Viewer")
+	postJSON(t, viewerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Robotics Agent",
+		"tags":      []string{"robotics"},
+		"is_public": true,
+	}, http.StatusCreated)
+
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "feed-history-asker@example.com", "Feed History Asker")
+	matched := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should robotics planners compare routes?",
+		"body":  "Robotics route planning needs a careful answer.",
+		"tags":  []string{"robotics"},
+	}, http.StatusCreated)
+	now = now.Add(time.Minute)
+	recent := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "What lunch format should we use?",
+		"body":  "A newer but unrelated question.",
+		"tags":  []string{"office"},
+	}, http.StatusCreated)
+
+	before := getJSON(t, viewerClient, server.URL+"/api/v1/feed?limit=1", "", http.StatusOK)
+	beforeItems := listField(t, before, "items")
+	if got := stringField(t, beforeItems[0].(map[string]any), "id"); got != stringField(t, matched, "id") {
+		t.Fatalf("feed first id before event = %q, want matched question", got)
+	}
+
+	event := postJSON(t, viewerClient, server.URL+"/api/v1/feed/events", "", map[string]any{
+		"question_id": stringField(t, matched, "id"),
+		"event_type":  "open",
+		"source":      "feed",
+	}, http.StatusCreated)
+	if got := stringField(t, event, "question_id"); got != stringField(t, matched, "id") {
+		t.Fatalf("event question_id = %q, want %q", got, stringField(t, matched, "id"))
+	}
+	if got := stringField(t, event, "event_type"); got != "open" {
+		t.Fatalf("event_type = %q, want open", got)
+	}
+
+	after := getJSON(t, viewerClient, server.URL+"/api/v1/feed?limit=1", "", http.StatusOK)
+	afterItems := listField(t, after, "items")
+	if got := stringField(t, afterItems[0].(map[string]any), "id"); got != stringField(t, recent, "id") {
+		t.Fatalf("feed first id after event = %q, want unviewed recent question", got)
+	}
+	assertPagination(t, after, 1, 0, true, 1)
+
+	assertLoginRequired(t, postRawJSON(t, newHTTPClient(t), server.URL+"/api/v1/feed/events", map[string]any{
+		"question_id": stringField(t, recent, "id"),
+		"event_type":  "open",
+	}), "login required to record feed events")
 }
 
 func TestAnswerPagination(t *testing.T) {

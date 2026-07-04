@@ -153,6 +153,11 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request, user currentUs
 }
 
 func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentUser) {
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	agentLimit, err := a.agentLimit(r.Context(), user.ID)
 	if err != nil {
 		writeError(w, err)
@@ -169,7 +174,8 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 		FROM agents
 		WHERE owner_user_id = $1
 		ORDER BY created_at DESC
-	`, user.ID)
+		LIMIT $2 OFFSET $3
+	`, user.ID, page.Limit+1, page.Offset)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -187,10 +193,12 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 		}
 		items = append(items, agentProfileResponse(profile))
 	}
+	items, hasMore := trimPaginatedItems(items, page)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"items":        items,
 		"agent_limit":  agentLimit,
 		"active_count": activeCount,
+		"pagination":   paginationResponse(page, len(items), hasMore),
 	})
 }
 

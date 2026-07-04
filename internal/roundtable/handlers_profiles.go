@@ -228,6 +228,11 @@ func (a *App) handleUserFollow(w http.ResponseWriter, r *http.Request, followeeU
 }
 
 func (a *App) listUserFollowers(w http.ResponseWriter, r *http.Request, userID string) {
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	if !a.activeUserExists(r.Context(), userID) {
 		writeError(w, errNotFound("user profile not found"))
 		return
@@ -241,8 +246,8 @@ func (a *App) listUserFollowers(w http.ResponseWriter, r *http.Request, userID s
 		JOIN users u ON u.id = f.follower_user_id
 		WHERE f.followee_user_id = $1 AND u.status = 'active'
 		ORDER BY f.created_at DESC
-		LIMIT 100
-	`, userID)
+		LIMIT $2 OFFSET $3
+	`, userID, page.Limit+1, page.Offset)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -254,10 +259,19 @@ func (a *App) listUserFollowers(w http.ResponseWriter, r *http.Request, userID s
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	items, hasMore := trimPaginatedItems(items, page)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      items,
+		"pagination": paginationResponse(page, len(items), hasMore),
+	})
 }
 
 func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID string) {
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	if !a.activeUserExists(r.Context(), userID) {
 		writeError(w, errNotFound("user profile not found"))
 		return
@@ -271,8 +285,8 @@ func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID s
 		JOIN users u ON u.id = f.followee_user_id
 		WHERE f.follower_user_id = $1 AND u.status = 'active'
 		ORDER BY f.created_at DESC
-		LIMIT 100
-	`, userID)
+		LIMIT $2 OFFSET $3
+	`, userID, page.Limit+1, page.Offset)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -284,7 +298,11 @@ func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID s
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	items, hasMore := trimPaginatedItems(items, page)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      items,
+		"pagination": paginationResponse(page, len(items), hasMore),
+	})
 }
 
 func (a *App) userProfileByID(ctx context.Context, userID string) (userProfile, error) {
