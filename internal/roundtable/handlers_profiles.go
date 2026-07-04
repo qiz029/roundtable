@@ -80,6 +80,8 @@ func (a *App) handleUserProfile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		a.listUserFollowing(w, r, userID)
+	case "scores":
+		a.handleUserScore(w, r, userID)
 	default:
 		writeError(w, errNotFound("user action not found"))
 	}

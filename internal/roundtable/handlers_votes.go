@@ -76,20 +76,37 @@ func (a *App) likeAnswer(w http.ResponseWriter, r *http.Request, voterType strin
 		return
 	}
 	now := a.now().UTC().Format(time.RFC3339Nano)
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	var result sql.Result
 	if voterType == "user" {
-		_, err = a.db.ExecContext(r.Context(), `
+		result, err = tx.ExecContext(r.Context(), `
 			INSERT INTO votes (id, answer_id, voter_type, user_id, value, created_at)
 			VALUES ($1, $2, 'user', $3, 1, $4)
 			ON CONFLICT DO NOTHING
 		`, voteID, answerID, voterID, now)
 	} else {
-		_, err = a.db.ExecContext(r.Context(), `
+		result, err = tx.ExecContext(r.Context(), `
 			INSERT INTO votes (id, answer_id, voter_type, agent_id, value, created_at)
 			VALUES ($1, $2, 'agent', $3, 1, $4)
 			ON CONFLICT DO NOTHING
 		`, voteID, answerID, voterID, now)
 	}
 	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected > 0 {
+		if err := a.insertVoteEvent(r.Context(), tx, answerID, voterType, voterID, "like", now); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -100,17 +117,36 @@ func (a *App) likeAnswer(w http.ResponseWriter, r *http.Request, voterType strin
 }
 
 func (a *App) unlikeAnswer(w http.ResponseWriter, r *http.Request, voterType string, voterID string, answerID string) {
-	var err error
+	now := a.now().UTC().Format(time.RFC3339Nano)
+	tx, err := a.db.BeginTx(r.Context(), nil)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	var result sql.Result
 	if voterType == "user" {
-		_, err = a.db.ExecContext(r.Context(), `
-			DELETE FROM votes WHERE answer_id = $1 AND voter_type = 'user' AND user_id = $2
-		`, answerID, voterID)
+		result, err = tx.ExecContext(r.Context(), `
+			UPDATE votes SET revoked_at = $3
+			WHERE answer_id = $1 AND voter_type = 'user' AND user_id = $2 AND revoked_at IS NULL
+		`, answerID, voterID, now)
 	} else {
-		_, err = a.db.ExecContext(r.Context(), `
-			DELETE FROM votes WHERE answer_id = $1 AND voter_type = 'agent' AND agent_id = $2
-		`, answerID, voterID)
+		result, err = tx.ExecContext(r.Context(), `
+			UPDATE votes SET revoked_at = $3
+			WHERE answer_id = $1 AND voter_type = 'agent' AND agent_id = $2 AND revoked_at IS NULL
+		`, answerID, voterID, now)
 	}
 	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if affected, _ := result.RowsAffected(); affected > 0 {
+		if err := a.insertVoteEvent(r.Context(), tx, answerID, voterType, voterID, "unlike", now); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -118,6 +154,25 @@ func (a *App) unlikeAnswer(w http.ResponseWriter, r *http.Request, voterType str
 		"answer_id":  answerID,
 		"like_count": a.likeCount(r.Context(), answerID),
 	})
+}
+
+func (a *App) insertVoteEvent(ctx context.Context, tx *sql.Tx, answerID string, voterType string, voterID string, action string, createdAt string) error {
+	eventID, err := newID("vev")
+	if err != nil {
+		return err
+	}
+	if voterType == "user" {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO vote_events (id, answer_id, voter_type, user_id, action, created_at)
+			VALUES ($1, $2, 'user', $3, $4, $5)
+		`, eventID, answerID, voterID, action, createdAt)
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO vote_events (id, answer_id, voter_type, agent_id, action, created_at)
+		VALUES ($1, $2, 'agent', $3, $4, $5)
+	`, eventID, answerID, voterID, action, createdAt)
+	return err
 }
 
 func (a *App) answerExists(ctx context.Context, answerID string) bool {
@@ -135,7 +190,7 @@ func (a *App) answerAgentID(ctx context.Context, answerID string) (string, error
 func (a *App) likeCount(ctx context.Context, answerID string) int {
 	var count int
 	_ = a.db.QueryRowContext(ctx, `
-		SELECT COALESCE(SUM(value), 0) FROM votes WHERE answer_id = $1
+		SELECT COALESCE(SUM(value), 0) FROM votes WHERE answer_id = $1 AND revoked_at IS NULL
 	`, answerID).Scan(&count)
 	return count
 }
