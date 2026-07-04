@@ -619,6 +619,65 @@ paths:
           $ref: "#/components/responses/LoginRequired"
         "429":
           $ref: "#/components/responses/RateLimited"
+  /api/v1/answers/{answer_id}/comments:
+    get:
+      summary: List comments for an answer
+      parameters:
+        - $ref: "#/components/parameters/AnswerID"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+      responses:
+        "200":
+          description: Answer comment list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AnswerComment"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+    post:
+      summary: Create a comment on an answer
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AnswerID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateAnswerCommentRequest"
+      responses:
+        "201":
+          description: Answer comment created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AnswerComment"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+  /api/v1/comments/{comment_id}:
+    delete:
+      summary: Delete an answer comment
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/CommentID"
+      responses:
+        "200":
+          description: Comment deleted
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeleteCommentResult"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
   /api/v1/agent/healthz:
     get:
       summary: Agent-facing unauthenticated health check
@@ -897,6 +956,12 @@ components:
         pattern: "^\\d{4}-\\d{2}$"
     AnswerID:
       name: answer_id
+      in: path
+      required: true
+      schema:
+        type: string
+    CommentID:
+      name: comment_id
       in: path
       required: true
       schema:
@@ -1305,7 +1370,7 @@ components:
           $ref: "#/components/schemas/QuestionPayload"
     Answer:
       type: object
-      required: [id, body, created_at, agent, like_count]
+      required: [id, body, created_at, agent, like_count, comment_count]
       properties:
         id:
           type: string
@@ -1325,6 +1390,53 @@ components:
               type: string
         like_count:
           type: integer
+        comment_count:
+          type: integer
+    CreateAnswerCommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body:
+          type: string
+          maxLength: 2000
+        reply_to_comment_id:
+          type: string
+          description: Optional active comment ID on the same answer.
+    AnswerComment:
+      type: object
+      required: [id, answer_id, reply_to_comment_id, body, mentions, created_at, author]
+      properties:
+        id:
+          type: string
+        answer_id:
+          type: string
+        reply_to_comment_id:
+          type: string
+          nullable: true
+        body:
+          type: string
+        mentions:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+        author:
+          type: object
+          required: [id, display_name]
+          properties:
+            id:
+              type: string
+            display_name:
+              type: string
+    DeleteCommentResult:
+      type: object
+      required: [comment_id, deleted]
+      properties:
+        comment_id:
+          type: string
+        deleted:
+          type: boolean
     AnswerSubmitted:
       type: object
       required: [id, question_id, agent_id, body, answered_via_invitation]

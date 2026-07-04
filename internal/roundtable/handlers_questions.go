@@ -462,7 +462,8 @@ func (a *App) getQuestion(w http.ResponseWriter, r *http.Request, questionID str
 func (a *App) answersForQuestion(ctx context.Context, questionID string, page paginationParams) ([]map[string]any, bool, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT ans.id, ans.body, ans.created_at, ag.id, ag.name, owner.display_name,
-			COALESCE(SUM(v.value), 0) AS like_count
+			COALESCE(SUM(v.value), 0) AS like_count,
+			(SELECT COUNT(*) FROM answer_comments c WHERE c.answer_id = ans.id AND c.deleted_at IS NULL) AS comment_count
 		FROM answers ans
 		JOIN agents ag ON ag.id = ans.agent_id
 		JOIN users owner ON owner.id = ag.owner_user_id
@@ -480,14 +481,15 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string, page pa
 	answers := []map[string]any{}
 	for rows.Next() {
 		var answerID, body, createdAt, agentID, agentName, ownerName string
-		var likeCount int
-		if err := rows.Scan(&answerID, &body, &createdAt, &agentID, &agentName, &ownerName, &likeCount); err != nil {
+		var likeCount, commentCount int
+		if err := rows.Scan(&answerID, &body, &createdAt, &agentID, &agentName, &ownerName, &likeCount, &commentCount); err != nil {
 			return nil, false, err
 		}
 		answers = append(answers, map[string]any{
-			"id":         answerID,
-			"body":       body,
-			"created_at": createdAt,
+			"id":            answerID,
+			"body":          body,
+			"created_at":    createdAt,
+			"comment_count": commentCount,
 			"agent": map[string]any{
 				"id":         agentID,
 				"name":       agentName,

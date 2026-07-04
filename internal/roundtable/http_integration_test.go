@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -302,6 +303,7 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	assertSelectable(t, db, `SELECT period, status, starts_at, ends_at, frozen_at FROM score_periods LIMIT 0`)
 	assertSelectable(t, db, `SELECT period, agent_id, owner_user_id, total_score, rank, details_json FROM agent_monthly_scores LIMIT 0`)
 	assertSelectable(t, db, `SELECT period, user_id, total_score, rank, details_json FROM user_monthly_scores LIMIT 0`)
+	assertSelectable(t, db, `SELECT answer_id, author_user_id, reply_to_comment_id, mentions_json, deleted_at FROM answer_comments LIMIT 0`)
 }
 
 func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
@@ -1479,6 +1481,174 @@ func TestAnswerFeedEventsAcceptAnswerID(t *testing.T) {
 	}
 }
 
+func TestAnswerCommentsCreateReplyListDeleteAndCounts(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "comment-asker@example.com", "Comment Asker")
+
+	firstOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, firstOwnerClient, server.URL, mailer, "comment-agent-one@example.com", "Comment Agent One Owner")
+	firstAgent := postJSON(t, firstOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Comment Agent One",
+		"is_public": true,
+	}, http.StatusCreated)
+	firstAgentToken := stringField(t, firstAgent, "token")
+
+	secondOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, secondOwnerClient, server.URL, mailer, "comment-agent-two@example.com", "Comment Agent Two Owner")
+	secondAgent := postJSON(t, secondOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Comment Agent Two",
+		"is_public": true,
+	}, http.StatusCreated)
+	secondAgentToken := stringField(t, secondAgent, "token")
+
+	question := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should answer comments work?",
+		"body":  "Each answer should have a flat comment thread.",
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+	firstAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", firstAgentToken, map[string]any{
+		"body": "Use a flat comment list below each answer.",
+	}, http.StatusCreated)
+	firstAnswerID := stringField(t, firstAnswer, "id")
+	secondAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", secondAgentToken, map[string]any{
+		"body": "Do not build nested reply trees for the MVP.",
+	}, http.StatusCreated)
+	secondAnswerID := stringField(t, secondAnswer, "id")
+
+	empty := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/"+firstAnswerID+"/comments", "", http.StatusOK)
+	if got := len(listField(t, empty, "items")); got != 0 {
+		t.Fatalf("initial comments count = %d, want 0", got)
+	}
+
+	anonymousClient := newHTTPClient(t)
+	assertLoginRequired(t, postRawJSON(t, anonymousClient, server.URL+"/api/v1/answers/"+firstAnswerID+"/comments", map[string]any{
+		"body": "Anonymous comment",
+	}), "login required to comment on answers")
+
+	commenterClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, commenterClient, server.URL, mailer, "commenter@example.com", "Commenter")
+	firstComment := postJSON(t, commenterClient, server.URL+"/api/v1/answers/"+firstAnswerID+"/comments", "", map[string]any{
+		"body": "  This adds useful context.  ",
+	}, http.StatusCreated)
+	firstCommentID := stringField(t, firstComment, "id")
+	if got := stringField(t, firstComment, "body"); got != "This adds useful context." {
+		t.Fatalf("first comment body = %q", got)
+	}
+	if got := firstComment["reply_to_comment_id"]; got != nil {
+		t.Fatalf("first reply_to_comment_id = %#v, want nil", got)
+	}
+	firstAuthor := mapField(t, firstComment, "author")
+	if got := stringField(t, firstAuthor, "display_name"); got != "Commenter" {
+		t.Fatalf("first author display_name = %q", got)
+	}
+
+	tooLong := postJSON(t, commenterClient, server.URL+"/api/v1/answers/"+firstAnswerID+"/comments", "", map[string]any{
+		"body": strings.Repeat("x", 2001),
+	}, http.StatusBadRequest)
+	if got := tooLong["code"]; got != "invalid_input" {
+		t.Fatalf("too-long comment code = %#v", got)
+	}
+
+	now = now.Add(time.Minute)
+	replyClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, replyClient, server.URL, mailer, "reply-commenter@example.com", "Reply Commenter")
+	replyComment := postJSON(t, replyClient, server.URL+"/api/v1/answers/"+firstAnswerID+"/comments", "", map[string]any{
+		"body":                "@Commenter agreed.",
+		"reply_to_comment_id": firstCommentID,
+	}, http.StatusCreated)
+	replyCommentID := stringField(t, replyComment, "id")
+	if got := stringField(t, replyComment, "reply_to_comment_id"); got != firstCommentID {
+		t.Fatalf("reply_to_comment_id = %q, want %q", got, firstCommentID)
+	}
+
+	now = now.Add(time.Minute)
+	otherAnswerComment := postJSON(t, commenterClient, server.URL+"/api/v1/answers/"+secondAnswerID+"/comments", "", map[string]any{
+		"body": "This belongs to the second answer.",
+	}, http.StatusCreated)
+	otherAnswerCommentID := stringField(t, otherAnswerComment, "id")
+	crossReply := postJSON(t, commenterClient, server.URL+"/api/v1/answers/"+firstAnswerID+"/comments", "", map[string]any{
+		"body":                "This should be rejected.",
+		"reply_to_comment_id": otherAnswerCommentID,
+	}, http.StatusBadRequest)
+	if got := crossReply["code"]; got != "invalid_input" {
+		t.Fatalf("cross-answer reply code = %#v", got)
+	}
+
+	firstPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/"+firstAnswerID+"/comments?limit=1", "", http.StatusOK)
+	firstPageItems := listField(t, firstPage, "items")
+	if got := stringField(t, firstPageItems[0].(map[string]any), "id"); got != firstCommentID {
+		t.Fatalf("first comments page first id = %q, want %q", got, firstCommentID)
+	}
+	assertPagination(t, firstPage, 1, 0, true, 1)
+	secondPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/"+firstAnswerID+"/comments?limit=1&offset=1", "", http.StatusOK)
+	secondPageItems := listField(t, secondPage, "items")
+	if got := stringField(t, secondPageItems[0].(map[string]any), "id"); got != replyCommentID {
+		t.Fatalf("second comments page first id = %q, want %q", got, replyCommentID)
+	}
+	assertPagination(t, secondPage, 1, 1, false, 0)
+
+	assertAnswerCommentCount(t, getJSON(t, askerClient, server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK), firstAnswerID, 2)
+	assertAnswerFeedCommentCount(t, getJSON(t, newHTTPClient(t), server.URL+"/api/v1/feed/answers?limit=10", "", http.StatusOK), firstAnswerID, 2)
+
+	otherUserClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, otherUserClient, server.URL, mailer, "other-commenter@example.com", "Other Commenter")
+	forbiddenDelete := deleteJSON(t, otherUserClient, server.URL+"/api/v1/comments/"+firstCommentID, "", http.StatusForbidden)
+	if got := forbiddenDelete["code"]; got != "forbidden" {
+		t.Fatalf("forbidden delete code = %#v", got)
+	}
+
+	deleteResp := deleteJSON(t, commenterClient, server.URL+"/api/v1/comments/"+firstCommentID, "", http.StatusOK)
+	if got := stringField(t, deleteResp, "comment_id"); got != firstCommentID {
+		t.Fatalf("deleted comment id = %q, want %q", got, firstCommentID)
+	}
+	if got := deleteResp["deleted"]; got != true {
+		t.Fatalf("deleted flag = %#v, want true", got)
+	}
+
+	afterDelete := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/"+firstAnswerID+"/comments", "", http.StatusOK)
+	afterDeleteItems := listField(t, afterDelete, "items")
+	if len(afterDeleteItems) != 1 {
+		t.Fatalf("comments after delete count = %d, want 1", len(afterDeleteItems))
+	}
+	if got := stringField(t, afterDeleteItems[0].(map[string]any), "id"); got != replyCommentID {
+		t.Fatalf("remaining comment id = %q, want reply %q", got, replyCommentID)
+	}
+	deletedReply := postJSON(t, replyClient, server.URL+"/api/v1/answers/"+firstAnswerID+"/comments", "", map[string]any{
+		"body":                "Cannot reply to a deleted comment.",
+		"reply_to_comment_id": firstCommentID,
+	}, http.StatusBadRequest)
+	if got := deletedReply["code"]; got != "invalid_input" {
+		t.Fatalf("reply to deleted comment code = %#v", got)
+	}
+
+	assertAnswerCommentCount(t, getJSON(t, askerClient, server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK), firstAnswerID, 1)
+	assertAnswerFeedCommentCount(t, getJSON(t, newHTTPClient(t), server.URL+"/api/v1/feed/answers?limit=10", "", http.StatusOK), firstAnswerID, 1)
+
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/ans_missing/comments", "", http.StatusNotFound)
+	deleteJSON(t, commenterClient, server.URL+"/api/v1/comments/cmt_missing", "", http.StatusNotFound)
+}
+
 func TestAnswerPagination(t *testing.T) {
 	t.Parallel()
 
@@ -2479,4 +2649,35 @@ func assertNestedPagination(t *testing.T, values map[string]any, name string, li
 	if got := pagination["next_offset"]; got != nil {
 		t.Fatalf("%s.next_offset = %#v, want nil", name, got)
 	}
+}
+
+func assertAnswerCommentCount(t *testing.T, question map[string]any, answerID string, want int) {
+	t.Helper()
+
+	for _, raw := range listField(t, question, "answers") {
+		answer := raw.(map[string]any)
+		if stringField(t, answer, "id") == answerID {
+			if got := intField(t, answer, "comment_count"); got != want {
+				t.Fatalf("answer %s comment_count = %d, want %d", answerID, got, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("answer %s was not present in question detail", answerID)
+}
+
+func assertAnswerFeedCommentCount(t *testing.T, feed map[string]any, answerID string, want int) {
+	t.Helper()
+
+	for _, raw := range listField(t, feed, "items") {
+		item := raw.(map[string]any)
+		answer := mapField(t, item, "answer")
+		if stringField(t, answer, "id") == answerID {
+			if got := intField(t, answer, "comment_count"); got != want {
+				t.Fatalf("feed answer %s comment_count = %d, want %d", answerID, got, want)
+			}
+			return
+		}
+	}
+	t.Fatalf("answer %s was not present in answer feed", answerID)
 }

@@ -90,6 +90,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/questions", a.handleQuestions)
 	mux.HandleFunc("/api/v1/questions/", a.handleQuestion)
 	mux.HandleFunc("/api/v1/answers/", a.handleUserAnswerAction)
+	mux.HandleFunc("/api/v1/comments/", a.handleCommentAction)
 	mux.HandleFunc("/api/v1/agent/healthz", a.handleHealth)
 	mux.HandleFunc("/api/v1/agent/profile", a.handleAgentProfile)
 	mux.HandleFunc("/api/v1/agent/feed", a.handleAgentFeed)
@@ -334,6 +335,17 @@ CREATE TABLE IF NOT EXISTS answers (
 	UNIQUE(question_id, agent_id)
 );
 
+CREATE TABLE IF NOT EXISTS answer_comments (
+	id TEXT PRIMARY KEY,
+	answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
+	author_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	reply_to_comment_id TEXT REFERENCES answer_comments(id) ON DELETE SET NULL,
+	body TEXT NOT NULL,
+	mentions_json TEXT NOT NULL DEFAULT '[]',
+	deleted_at TEXT,
+	created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS feed_events (
 	id TEXT PRIMARY KEY,
 	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -438,6 +450,13 @@ CREATE INDEX IF NOT EXISTS questions_created
 
 CREATE INDEX IF NOT EXISTS answers_question
 	ON answers(question_id);
+
+CREATE INDEX IF NOT EXISTS answer_comments_answer_created
+	ON answer_comments(answer_id, created_at, id)
+	WHERE deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS answer_comments_author
+	ON answer_comments(author_user_id, created_at DESC);
 
 	ALTER TABLE feed_events ALTER COLUMN question_id DROP NOT NULL;
 	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE;

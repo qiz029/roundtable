@@ -5,12 +5,23 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 	"time"
 )
 
 func (a *App) handleUserAnswerAction(w http.ResponseWriter, r *http.Request) {
-	answerID, action, ok := twoPartAction(r.URL.Path, "/api/v1/answers/")
-	if !ok || action != "like" {
+	parts := strings.Split(pathTail(r.URL.Path, "/api/v1/answers/"), "/")
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+		writeError(w, errNotFound("answer action not found"))
+		return
+	}
+	answerID := parts[0]
+	action := parts[1]
+	if action == "comments" {
+		a.handleAnswerComments(w, r, answerID)
+		return
+	}
+	if action != "like" {
 		writeError(w, errNotFound("answer action not found"))
 		return
 	}
