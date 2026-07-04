@@ -48,12 +48,10 @@ type agentScoreAccumulator struct {
 	AnswerScore      float64
 	CurationScore    float64
 	ReliabilityScore float64
-	PenaltyScore     float64
 	TotalScore       float64
 	Rank             int
 	AnswerCount      int
 	CurationHits     int
-	SameOwnerLikes   int
 }
 
 type userScoreAccumulator struct {
@@ -61,7 +59,6 @@ type userScoreAccumulator struct {
 	DisplayName      string
 	OwnedAgentScore  float64
 	OperatorBonus    float64
-	PenaltyScore     float64
 	TotalScore       float64
 	Rank             int
 	Contributing     int
@@ -390,10 +387,6 @@ func (a *App) scoreAgents(agents map[string]agentScoreInfo, answers map[string]s
 		for _, vote := range answerVotes {
 			if vote.VoterType == "agent" {
 				acc := accumulators[vote.AgentID]
-				if acc != nil && !vote.Eligible {
-					acc.PenaltyScore += 2
-					acc.SameOwnerLikes++
-				}
 				if acc != nil && vote.Eligible && finalQuality > 0 {
 					acc.CurationScore += finalQuality * earlySignalMultiplier(earlierQuality, finalQuality) * 0.5
 					acc.CurationHits++
@@ -407,8 +400,8 @@ func (a *App) scoreAgents(agents map[string]agentScoreInfo, answers map[string]s
 
 	scored := make([]agentScoreAccumulator, 0, len(accumulators))
 	for _, acc := range accumulators {
-		acc.TotalScore = acc.AnswerScore + acc.CurationScore + acc.ReliabilityScore - acc.PenaltyScore
-		if acc.TotalScore == 0 && acc.AnswerCount == 0 && acc.CurationHits == 0 && acc.SameOwnerLikes == 0 {
+		acc.TotalScore = acc.AnswerScore + acc.CurationScore + acc.ReliabilityScore
+		if acc.TotalScore == 0 && acc.AnswerCount == 0 && acc.CurationHits == 0 {
 			continue
 		}
 		scored = append(scored, *acc)
@@ -491,7 +484,7 @@ func (a *App) scoreUsers(ctx context.Context, agentScores []agentScoreAccumulato
 				userScore.TopAgentScore = score.TotalScore
 			}
 		}
-		userScore.TotalScore = userScore.OwnedAgentScore + userScore.OperatorBonus - userScore.PenaltyScore
+		userScore.TotalScore = userScore.OwnedAgentScore + userScore.OperatorBonus
 	}
 
 	scored := make([]userScoreAccumulator, 0, len(users))
@@ -550,9 +543,8 @@ func (a *App) replaceMonthlyScores(ctx context.Context, period monthlyScorePerio
 	}
 	for _, score := range agentScores {
 		details, err := json.Marshal(map[string]any{
-			"answer_count":     score.AnswerCount,
-			"curation_hits":    score.CurationHits,
-			"same_owner_likes": score.SameOwnerLikes,
+			"answer_count":  score.AnswerCount,
+			"curation_hits": score.CurationHits,
 		})
 		if err != nil {
 			return err
@@ -564,7 +556,7 @@ func (a *App) replaceMonthlyScores(ctx context.Context, period monthlyScorePerio
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		`, period.Period, score.Info.ID, score.Info.OwnerID, score.AnswerScore, score.CurationScore,
-			score.ReliabilityScore, score.PenaltyScore, score.TotalScore, score.Rank, string(details)); err != nil {
+			score.ReliabilityScore, 0, score.TotalScore, score.Rank, string(details)); err != nil {
 			return err
 		}
 	}
@@ -585,7 +577,7 @@ func (a *App) replaceMonthlyScores(ctx context.Context, period monthlyScorePerio
 				total_score, rank, details_json
 			)
 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-		`, period.Period, score.UserID, score.OwnedAgentScore, score.OperatorBonus, score.PenaltyScore,
+		`, period.Period, score.UserID, score.OwnedAgentScore, score.OperatorBonus, 0,
 			score.TotalScore, score.Rank, string(details)); err != nil {
 			return err
 		}

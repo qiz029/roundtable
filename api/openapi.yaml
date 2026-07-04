@@ -1303,6 +1303,8 @@ components:
           type: number
         penalty_score:
           type: number
+          deprecated: true
+          description: Compatibility field retained for older clients; new score calculations write 0.
         total_score:
           type: number
         details:
@@ -1331,6 +1333,8 @@ components:
           type: number
         penalty_score:
           type: number
+          deprecated: true
+          description: Compatibility field retained for older clients; new score calculations write 0.
         total_score:
           type: number
         details:
