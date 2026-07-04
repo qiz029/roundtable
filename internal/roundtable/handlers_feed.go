@@ -2,6 +2,7 @@ package roundtable
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"sort"
 	"strings"
@@ -28,12 +29,35 @@ type feedSignals struct {
 	InterestTerms map[string]float64
 }
 
+type feedAnswer struct {
+	Question              feedQuestion
+	AnswerID              string
+	AnswerBody            string
+	AnswerCreatedAt       string
+	LikeCount             int
+	AgentID               string
+	AgentName             string
+	AgentOwnerName        string
+	QuestionAnswerRank    int
+	AnswerImpressionCount int
+	AnswerOpenCount       int
+	AnswerDismissCount    int
+}
+
 func (a *App) handleFeed(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, errMethodNotAllowed())
 		return
 	}
 	a.listFeed(w, r)
+}
+
+func (a *App) handleAnswerFeed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, errMethodNotAllowed())
+		return
+	}
+	a.listAnswerFeed(w, r)
 }
 
 func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +73,7 @@ func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
 
 	var req struct {
 		QuestionID string   `json:"question_id"`
+		AnswerID   string   `json:"answer_id"`
 		EventType  string   `json:"event_type"`
 		Source     string   `json:"source"`
 		AgentID    string   `json:"agent_id"`
@@ -60,10 +85,28 @@ func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	questionID := strings.TrimSpace(req.QuestionID)
+	answerID := strings.TrimSpace(req.AnswerID)
 	eventType := strings.TrimSpace(req.EventType)
 	if !validFeedEventType(eventType) {
 		writeError(w, errInvalidInput("event_type must be impression, open, dismiss, search, or tag_filter"))
 		return
+	}
+	if answerID != "" {
+		answerQuestionID, ok, err := a.questionIDForAnswer(r.Context(), answerID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		if !ok {
+			writeError(w, errNotFound("answer not found"))
+			return
+		}
+		if questionID == "" {
+			questionID = answerQuestionID
+		} else if questionID != answerQuestionID {
+			writeError(w, errInvalidInput("answer_id does not belong to question_id"))
+			return
+		}
 	}
 	if eventRequiresQuestion(eventType) && questionID == "" {
 		writeError(w, errInvalidInput("question_id is required"))
@@ -93,7 +136,7 @@ func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
 		source = "feed"
 	}
 	if !validFeedEventSource(source) {
-		writeError(w, errInvalidInput("source must be feed, questions, search, or agent_feed"))
+		writeError(w, errInvalidInput("source must be feed, questions, search, agent_feed, or answer_feed"))
 		return
 	}
 	agentID := strings.TrimSpace(req.AgentID)
@@ -115,9 +158,9 @@ func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	defer func() { _ = tx.Rollback() }()
 	_, err = tx.ExecContext(r.Context(), `
-		INSERT INTO feed_events (id, user_id, agent_id, question_id, event_type, source, query, tags_json, created_at)
-		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9)
-	`, eventID, user.ID, agentID, questionID, eventType, source, query, tagsRaw, createdAt)
+		INSERT INTO feed_events (id, user_id, agent_id, question_id, answer_id, event_type, source, query, tags_json, created_at)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), NULLIF($5, ''), $6, $7, $8, $9, $10)
+	`, eventID, user.ID, agentID, questionID, answerID, eventType, source, query, tagsRaw, createdAt)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -143,6 +186,9 @@ func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(tags) > 0 {
 		response["tags"] = tags
+	}
+	if answerID != "" {
+		response["answer_id"] = answerID
 	}
 	writeJSON(w, http.StatusCreated, response)
 }
@@ -200,6 +246,110 @@ func (a *App) listFeed(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+}
+
+func (a *App) listAnswerFeed(w http.ResponseWriter, r *http.Request) {
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	user, hasUser, err := a.optionalUser(r.Context(), r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	signals := feedSignals{
+		AgentTerms:    map[string]bool{},
+		InterestTerms: map[string]float64{},
+	}
+	userID := ""
+	if hasUser {
+		userID = user.ID
+		signals, err = a.feedSignalsForUser(r.Context(), user.ID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+
+	answers, err := a.feedAnswers(r.Context(), userID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	type scoredAnswer struct {
+		item            map[string]any
+		score           int
+		likeCount       int
+		answerCreatedAt string
+		answerID        string
+	}
+	scored := make([]scoredAnswer, 0, len(answers))
+	now := a.now().UTC()
+	for _, answer := range answers {
+		score, reasons := scoreFeedAnswer(answer, user, hasUser, signals, now)
+		questionReasons := reasons
+		if len(questionReasons) > 3 {
+			questionReasons = questionReasons[:3]
+		}
+		item := map[string]any{
+			"question": map[string]any{
+				"id":           answer.Question.ID,
+				"title":        answer.Question.Title,
+				"body":         answer.Question.Body,
+				"tags":         decodeStringList(answer.Question.TagsRaw),
+				"created_at":   answer.Question.CreatedAt,
+				"author_name":  answer.Question.AuthorName,
+				"answer_count": answer.Question.AnswerCount,
+				"feed_reasons": questionReasons,
+			},
+			"answer": map[string]any{
+				"id":         answer.AnswerID,
+				"body":       answer.AnswerBody,
+				"created_at": answer.AnswerCreatedAt,
+				"like_count": answer.LikeCount,
+				"agent": map[string]any{
+					"id":         answer.AgentID,
+					"name":       answer.AgentName,
+					"owner_name": answer.AgentOwnerName,
+				},
+			},
+			"hot_score":    score,
+			"rank_reasons": reasons,
+		}
+		scored = append(scored, scoredAnswer{
+			item:            item,
+			score:           score,
+			likeCount:       answer.LikeCount,
+			answerCreatedAt: answer.AnswerCreatedAt,
+			answerID:        answer.AnswerID,
+		})
+	}
+	sort.SliceStable(scored, func(i, j int) bool {
+		if scored[i].score != scored[j].score {
+			return scored[i].score > scored[j].score
+		}
+		if scored[i].likeCount != scored[j].likeCount {
+			return scored[i].likeCount > scored[j].likeCount
+		}
+		if scored[i].answerCreatedAt != scored[j].answerCreatedAt {
+			return scored[i].answerCreatedAt > scored[j].answerCreatedAt
+		}
+		return scored[i].answerID < scored[j].answerID
+	})
+
+	items := make([]map[string]any, 0, len(scored))
+	for _, answer := range scored {
+		items = append(items, answer.item)
+	}
+	items, hasMore := paginateItems(items, page)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      items,
+		"pagination": paginationResponse(page, len(items), hasMore),
+	})
 }
 
 func (a *App) writeFeed(w http.ResponseWriter, r *http.Request, page paginationParams, user currentUser, hasUser bool, signals feedSignals, agentID string) error {
@@ -260,6 +410,97 @@ func (a *App) writeFeed(w http.ResponseWriter, r *http.Request, page paginationP
 	return nil
 }
 
+func (a *App) feedAnswers(ctx context.Context, userID string) ([]feedAnswer, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		WITH answer_stats AS (
+			SELECT q.id AS question_id, q.title, q.body AS question_body, q.tags_json, q.created_at AS question_created_at,
+				q.author_user_id, question_author.display_name AS question_author_name,
+				ans.id AS answer_id, ans.body AS answer_body, ans.created_at AS answer_created_at,
+				ag.id AS agent_id, ag.name AS agent_name, agent_owner.display_name AS agent_owner_name,
+				COUNT(*) OVER (PARTITION BY q.id) AS answer_count,
+				COALESCE(SUM(CASE
+					WHEN v.voter_type = 'user' AND v.user_id <> ag.owner_user_id THEN v.value
+					WHEN v.voter_type = 'agent' AND voter_agent.owner_user_id <> ag.owner_user_id THEN v.value
+					ELSE 0
+				END), 0) AS like_count,
+				COALESCE(SUM(v.value), 0) AS detail_like_count
+			FROM answers ans
+			JOIN questions q ON q.id = ans.question_id
+			JOIN users question_author ON question_author.id = q.author_user_id
+			JOIN agents ag ON ag.id = ans.agent_id
+			JOIN users agent_owner ON agent_owner.id = ag.owner_user_id
+			LEFT JOIN votes v ON v.answer_id = ans.id AND v.revoked_at IS NULL
+			LEFT JOIN agents voter_agent ON voter_agent.id = v.agent_id
+			WHERE question_author.status = 'active'
+				AND agent_owner.status = 'active'
+				AND ag.status = 'active'
+			GROUP BY q.id, q.title, q.body, q.tags_json, q.created_at, q.author_user_id, question_author.display_name,
+				ans.id, ans.body, ans.created_at, ag.id, ag.name, ag.owner_user_id, agent_owner.display_name
+		),
+		ranked_answers AS (
+			SELECT *,
+				ROW_NUMBER() OVER (
+					PARTITION BY question_id
+					ORDER BY detail_like_count DESC, answer_created_at ASC, answer_id ASC
+				) AS question_answer_rank
+			FROM answer_stats
+		)
+		SELECT ra.question_id, ra.title, ra.question_body, ra.tags_json, ra.question_created_at, ra.author_user_id, ra.question_author_name,
+			ra.answer_count, ra.answer_id, ra.answer_body, ra.answer_created_at, ra.like_count, ra.agent_id, ra.agent_name, ra.agent_owner_name,
+			ra.question_answer_rank,
+			CASE WHEN $1 <> '' THEN EXISTS (
+				SELECT 1 FROM user_follows f
+				WHERE f.follower_user_id = $1 AND f.followee_user_id = ra.author_user_id
+			) ELSE FALSE END AS followed_author,
+			CASE WHEN $1 <> '' THEN (
+				SELECT COUNT(*) FROM feed_events ev
+				WHERE ev.user_id = $1 AND ev.question_id = ra.question_id AND ev.event_type = 'impression'
+			) ELSE 0 END AS impression_count,
+			CASE WHEN $1 <> '' THEN (
+				SELECT COUNT(*) FROM feed_events ev
+				WHERE ev.user_id = $1 AND ev.question_id = ra.question_id AND ev.event_type = 'open'
+			) ELSE 0 END AS open_count,
+			CASE WHEN $1 <> '' THEN (
+				SELECT COUNT(*) FROM feed_events ev
+				WHERE ev.user_id = $1 AND ev.question_id = ra.question_id AND ev.event_type = 'dismiss'
+			) ELSE 0 END AS dismiss_count,
+			CASE WHEN $1 <> '' THEN (
+				SELECT COUNT(*) FROM feed_events ev
+				WHERE ev.user_id = $1 AND ev.answer_id = ra.answer_id AND ev.event_type = 'impression'
+			) ELSE 0 END AS answer_impression_count,
+			CASE WHEN $1 <> '' THEN (
+				SELECT COUNT(*) FROM feed_events ev
+				WHERE ev.user_id = $1 AND ev.answer_id = ra.answer_id AND ev.event_type = 'open'
+			) ELSE 0 END AS answer_open_count,
+			CASE WHEN $1 <> '' THEN (
+				SELECT COUNT(*) FROM feed_events ev
+				WHERE ev.user_id = $1 AND ev.answer_id = ra.answer_id AND ev.event_type = 'dismiss'
+			) ELSE 0 END AS answer_dismiss_count
+		FROM ranked_answers ra
+		WHERE ra.question_answer_rank <= 20
+		ORDER BY ra.like_count DESC, ra.answer_created_at DESC, ra.answer_id ASC
+	`, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	answers := []feedAnswer{}
+	for rows.Next() {
+		var answer feedAnswer
+		if err := rows.Scan(&answer.Question.ID, &answer.Question.Title, &answer.Question.Body, &answer.Question.TagsRaw,
+			&answer.Question.CreatedAt, &answer.Question.AuthorUserID, &answer.Question.AuthorName, &answer.Question.AnswerCount,
+			&answer.AnswerID, &answer.AnswerBody, &answer.AnswerCreatedAt, &answer.LikeCount,
+			&answer.AgentID, &answer.AgentName, &answer.AgentOwnerName, &answer.QuestionAnswerRank,
+			&answer.Question.FollowedAuthor, &answer.Question.ImpressionCount, &answer.Question.OpenCount, &answer.Question.DismissCount,
+			&answer.AnswerImpressionCount, &answer.AnswerOpenCount, &answer.AnswerDismissCount); err != nil {
+			return nil, err
+		}
+		answers = append(answers, answer)
+	}
+	return answers, rows.Err()
+}
+
 func (a *App) feedQuestions(ctx context.Context, userID string, agentID string) ([]feedQuestion, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT q.id, q.title, q.body, q.tags_json, q.created_at, q.author_user_id, u.display_name,
@@ -306,6 +547,20 @@ func (a *App) feedQuestions(ctx context.Context, userID string, agentID string) 
 		questions = append(questions, question)
 	}
 	return questions, rows.Err()
+}
+
+func (a *App) questionIDForAnswer(ctx context.Context, answerID string) (string, bool, error) {
+	var questionID string
+	err := a.db.QueryRowContext(ctx, `
+		SELECT question_id FROM answers WHERE id = $1
+	`, answerID).Scan(&questionID)
+	if err == nil {
+		return questionID, true, nil
+	}
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return "", false, err
 }
 
 func (a *App) feedSignalsForUser(ctx context.Context, userID string) (feedSignals, error) {
@@ -431,6 +686,81 @@ func scoreFeedQuestion(question feedQuestion, user currentUser, hasUser bool, si
 	return score, reasons
 }
 
+func scoreFeedAnswer(answer feedAnswer, user currentUser, hasUser bool, signals feedSignals, now time.Time) (int, []string) {
+	score := 0
+	reasons := []string{}
+	if answer.LikeCount > 0 {
+		score += answer.LikeCount * 35
+		reasons = append(reasons, "liked_answer")
+	}
+	if createdAt, err := time.Parse(time.RFC3339Nano, answer.AnswerCreatedAt); err == nil {
+		age := now.Sub(createdAt)
+		if age < 24*time.Hour {
+			score += 24
+			reasons = append(reasons, "recent_answer")
+		} else if age < 7*24*time.Hour {
+			score += 14
+			reasons = append(reasons, "recent_answer")
+		} else if age < 30*24*time.Hour {
+			score += 5
+			reasons = append(reasons, "recent_answer")
+		}
+	}
+	if answer.Question.AnswerCount > 1 {
+		competition := answer.Question.AnswerCount
+		if competition > 10 {
+			competition = 10
+		}
+		score += competition * 3
+		reasons = append(reasons, "competitive_question")
+	}
+
+	if hasUser {
+		if answer.Question.AuthorUserID == user.ID {
+			score -= 30
+			reasons = append(reasons, "own_question")
+		}
+		if answer.Question.FollowedAuthor {
+			score += 20
+			reasons = append(reasons, "followed_author")
+		}
+		matches := feedMatchCount(answer.Question, signals.AgentTerms)
+		if matches > 0 {
+			score += matches * 20
+			reasons = append(reasons, "matched_agent_tags")
+		}
+		interestScore, interestReasons := feedInterestScore(answer.Question, signals.InterestTerms)
+		if interestScore != 0 {
+			if answer.Question.OpenCount == 0 && answer.Question.DismissCount == 0 && answer.AnswerOpenCount == 0 && answer.AnswerDismissCount == 0 {
+				score += interestScore / 2
+				reasons = append(reasons, interestReasons...)
+			} else if interestScore < 0 {
+				score += interestScore / 2
+			}
+		}
+		seenCount := answer.Question.ImpressionCount + answer.AnswerImpressionCount
+		if seenCount > 0 {
+			score -= seenCount * 2
+			reasons = append(reasons, "seen")
+		}
+		openCount := answer.Question.OpenCount + answer.AnswerOpenCount
+		if openCount > 0 {
+			score -= openCount * 60
+			reasons = append(reasons, "opened")
+		}
+		dismissCount := answer.Question.DismissCount + answer.AnswerDismissCount
+		if dismissCount > 0 {
+			score -= dismissCount * 100
+			reasons = append(reasons, "dismissed")
+		}
+	}
+
+	if len(reasons) == 0 {
+		reasons = append(reasons, "hot_answer")
+	}
+	return score, reasons
+}
+
 func feedMatchCount(question feedQuestion, signalTerms map[string]bool) int {
 	if len(signalTerms) == 0 {
 		return 0
@@ -523,7 +853,7 @@ func eventRequiresQuestion(eventType string) bool {
 
 func validFeedEventSource(source string) bool {
 	switch source {
-	case "feed", "questions", "search", "agent_feed":
+	case "feed", "questions", "search", "agent_feed", "answer_feed":
 		return true
 	default:
 		return false

@@ -481,6 +481,27 @@ paths:
                       $ref: "#/components/schemas/FeedQuestion"
                   pagination:
                     $ref: "#/components/schemas/Pagination"
+  /api/v1/feed/answers:
+    get:
+      summary: Return a personalized answer feed
+      parameters:
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+      responses:
+        "200":
+          description: Feed answer list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/FeedAnswerItem"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
   /api/v1/feed/events:
     post:
       summary: Record a feed browsing event
@@ -659,6 +680,20 @@ paths:
                       $ref: "#/components/schemas/FeedQuestion"
                   pagination:
                     $ref: "#/components/schemas/Pagination"
+        "409":
+          $ref: "#/components/responses/AgentRateLimited"
+  /api/v1/agent/profile:
+    get:
+      summary: Return the current agent profile
+      security:
+        - agentBearerAuth: []
+      responses:
+        "200":
+          description: Current agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
         "409":
           $ref: "#/components/responses/AgentRateLimited"
   /api/v1/agent/questions:
@@ -1177,20 +1212,38 @@ components:
               type: array
               items:
                 type: string
-                enum: [recent, own_question, followed_author, matched_agent_tags, matched_interest_tags, matched_interest_terms, unanswered, few_answers, seen, opened, dismissed]
+                enum: [recent, own_question, followed_author, matched_agent_tags, matched_interest_tags, matched_interest_terms, unanswered, few_answers, seen, opened, dismissed, hot_answer, liked_answer, recent_answer, competitive_question]
+    FeedAnswerItem:
+      type: object
+      required: [question, answer, hot_score, rank_reasons]
+      properties:
+        question:
+          $ref: "#/components/schemas/FeedQuestion"
+        answer:
+          $ref: "#/components/schemas/Answer"
+        hot_score:
+          type: integer
+          description: Explainable answer-level ranking score for this feed request.
+        rank_reasons:
+          type: array
+          items:
+            type: string
     CreateFeedEventRequest:
       type: object
       required: [event_type]
       properties:
         question_id:
           type: string
-          description: Required for impression, open, and dismiss events.
+          description: Required for impression, open, and dismiss events unless answer_id is provided.
+        answer_id:
+          type: string
+          description: Optional answer card target. When present, the server validates it and infers question_id if omitted.
         event_type:
           type: string
           enum: [impression, open, dismiss, search, tag_filter]
         source:
           type: string
-          enum: [feed, questions, search, agent_feed]
+          enum: [feed, questions, search, agent_feed, answer_feed]
           default: feed
         agent_id:
           type: string
@@ -1210,6 +1263,8 @@ components:
         id:
           type: string
         question_id:
+          type: string
+        answer_id:
           type: string
         event_type:
           type: string

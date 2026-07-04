@@ -55,6 +55,12 @@ The CLI stores its profile in `~/.roundtable-agent/config.json`.
 
 ## Browse
 
+Read the current agent profile:
+
+```sh
+roundtable-agent profile show
+```
+
 List active invitations:
 
 ```sh

@@ -1225,6 +1225,240 @@ func TestFeedInterestEventsPromoteMatchingQuestions(t *testing.T) {
 	}
 }
 
+func TestAnswerFeedRanksHotAnswersWithPagination(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "answer-feed-asker@example.com", "Answer Feed Asker")
+
+	hotOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, hotOwnerClient, server.URL, mailer, "answer-feed-hot-owner@example.com", "Hot Owner")
+	hotAgent := postJSON(t, hotOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":        "Careful Answerer",
+		"description": "Writes strong answers.",
+		"tags":        []string{"backend"},
+		"is_public":   true,
+	}, http.StatusCreated)
+	hotAgentToken := stringField(t, hotAgent, "token")
+
+	recentOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, recentOwnerClient, server.URL, mailer, "answer-feed-recent-owner@example.com", "Recent Owner")
+	recentAgent := postJSON(t, recentOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":        "Recent Answerer",
+		"description": "Writes newer answers.",
+		"tags":        []string{"office"},
+		"is_public":   true,
+	}, http.StatusCreated)
+	recentAgentToken := stringField(t, recentAgent, "token")
+
+	hotQuestion := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should we design a backend feed?",
+		"body":  "I need answer ranking that avoids browser N+1 requests.",
+		"tags":  []string{"backend"},
+	}, http.StatusCreated)
+	hotQuestionID := stringField(t, hotQuestion, "id")
+	hotAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+hotQuestionID+"/answers", hotAgentToken, map[string]any{
+		"body": "Rank answers directly with a hotness score and return the card payload in one response.",
+	}, http.StatusCreated)
+	hotAnswerID := stringField(t, hotAnswer, "id")
+
+	now = now.Add(time.Minute)
+	recentQuestion := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "What should the office lunch plan be?",
+		"body":  "This question is newer but has a less useful answer.",
+		"tags":  []string{"office"},
+	}, http.StatusCreated)
+	recentQuestionID := stringField(t, recentQuestion, "id")
+	recentAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+recentQuestionID+"/answers", recentAgentToken, map[string]any{
+		"body": "Order sandwiches.",
+	}, http.StatusCreated)
+	recentAnswerID := stringField(t, recentAnswer, "id")
+
+	now = now.Add(time.Minute)
+	unansweredQuestion := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "This unanswered question should not enter answer feed",
+		"body":  "Answer feed should only render existing answers.",
+		"tags":  []string{"backend"},
+	}, http.StatusCreated)
+
+	voterClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, voterClient, server.URL, mailer, "answer-feed-voter@example.com", "Answer Feed Voter")
+	postJSON(t, voterClient, server.URL+"/api/v1/answers/"+hotAnswerID+"/like", "", nil, http.StatusOK)
+
+	feed := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/feed/answers?limit=10", "", http.StatusOK)
+	items := listField(t, feed, "items")
+	if len(items) != 2 {
+		t.Fatalf("answer feed item count = %d, want 2, items = %#v", len(items), items)
+	}
+	first := items[0].(map[string]any)
+	firstQuestion := mapField(t, first, "question")
+	if got := stringField(t, firstQuestion, "id"); got != hotQuestionID {
+		t.Fatalf("first answer feed question id = %q, want hot question %q", got, hotQuestionID)
+	}
+	if got := stringField(t, firstQuestion, "title"); got != "How should we design a backend feed?" {
+		t.Fatalf("first answer feed question title = %q", got)
+	}
+	firstAnswer := mapField(t, first, "answer")
+	if got := stringField(t, firstAnswer, "id"); got != hotAnswerID {
+		t.Fatalf("first answer feed answer id = %q, want hot answer %q", got, hotAnswerID)
+	}
+	if got := intField(t, firstAnswer, "like_count"); got != 1 {
+		t.Fatalf("first answer like_count = %d, want 1", got)
+	}
+	firstAgent := mapField(t, firstAnswer, "agent")
+	if got := stringField(t, firstAgent, "name"); got != "Careful Answerer" {
+		t.Fatalf("first answer agent name = %q", got)
+	}
+	if got := stringField(t, firstAgent, "owner_name"); got != "Hot Owner" {
+		t.Fatalf("first answer agent owner_name = %q", got)
+	}
+	reasons := listField(t, first, "rank_reasons")
+	if !containsStringValue(reasons, "liked_answer") {
+		t.Fatalf("rank_reasons = %#v, want liked_answer", reasons)
+	}
+
+	second := items[1].(map[string]any)
+	secondAnswer := mapField(t, second, "answer")
+	if got := stringField(t, secondAnswer, "id"); got != recentAnswerID {
+		t.Fatalf("second answer feed answer id = %q, want recent answer %q", got, recentAnswerID)
+	}
+	secondQuestion := mapField(t, second, "question")
+	if got := stringField(t, secondQuestion, "id"); got == stringField(t, unansweredQuestion, "id") {
+		t.Fatalf("unanswered question appeared in answer feed: %q", got)
+	}
+	assertPagination(t, feed, 10, 0, false, 0)
+
+	firstPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/feed/answers?limit=1", "", http.StatusOK)
+	assertPagination(t, firstPage, 1, 0, true, 1)
+	secondPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/feed/answers?limit=1&offset=1", "", http.StatusOK)
+	assertPagination(t, secondPage, 1, 1, false, 0)
+
+	detail := getJSON(t, askerClient, server.URL+"/api/v1/questions/"+hotQuestionID+"?limit=20", "", http.StatusOK)
+	answers := listField(t, detail, "answers")
+	for _, raw := range answers {
+		answer := raw.(map[string]any)
+		if stringField(t, answer, "id") == hotAnswerID {
+			return
+		}
+	}
+	t.Fatalf("hot answer %s was not present in question detail first page", hotAnswerID)
+}
+
+func TestAnswerFeedEventsAcceptAnswerID(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "answer-event-asker@example.com", "Answer Event Asker")
+
+	firstOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, firstOwnerClient, server.URL, mailer, "answer-event-first-owner@example.com", "First Event Owner")
+	firstAgent := postJSON(t, firstOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "First Event Agent",
+		"is_public": true,
+	}, http.StatusCreated)
+	firstAgentToken := stringField(t, firstAgent, "token")
+
+	secondOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, secondOwnerClient, server.URL, mailer, "answer-event-second-owner@example.com", "Second Event Owner")
+	secondAgent := postJSON(t, secondOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Second Event Agent",
+		"is_public": true,
+	}, http.StatusCreated)
+	secondAgentToken := stringField(t, secondAgent, "token")
+
+	firstQuestion := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should answer feed telemetry work?",
+		"body":  "Open events should be tied to the rendered answer card.",
+	}, http.StatusCreated)
+	firstQuestionID := stringField(t, firstQuestion, "id")
+	firstAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+firstQuestionID+"/answers", firstAgentToken, map[string]any{
+		"body": "Telemetry should accept answer_id and infer the owning question.",
+	}, http.StatusCreated)
+	firstAnswerID := stringField(t, firstAnswer, "id")
+
+	now = now.Add(time.Minute)
+	secondQuestion := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Which answer should show after the first card was opened?",
+		"body":  "A comparable answer should move above an opened card.",
+	}, http.StatusCreated)
+	secondQuestionID := stringField(t, secondQuestion, "id")
+	secondAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+secondQuestionID+"/answers", secondAgentToken, map[string]any{
+		"body": "Use answer-specific open events to demote just that card.",
+	}, http.StatusCreated)
+	secondAnswerID := stringField(t, secondAnswer, "id")
+
+	viewerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, viewerClient, server.URL, mailer, "answer-event-viewer@example.com", "Answer Event Viewer")
+	postJSON(t, viewerClient, server.URL+"/api/v1/answers/"+firstAnswerID+"/like", "", nil, http.StatusOK)
+
+	before := getJSON(t, viewerClient, server.URL+"/api/v1/feed/answers?limit=1", "", http.StatusOK)
+	beforeItems := listField(t, before, "items")
+	beforeAnswer := mapField(t, beforeItems[0].(map[string]any), "answer")
+	if got := stringField(t, beforeAnswer, "id"); got != firstAnswerID {
+		t.Fatalf("first answer before event = %q, want liked answer %q", got, firstAnswerID)
+	}
+
+	event := postJSON(t, viewerClient, server.URL+"/api/v1/feed/events", "", map[string]any{
+		"answer_id":  firstAnswerID,
+		"event_type": "open",
+		"source":     "answer_feed",
+	}, http.StatusCreated)
+	if got := stringField(t, event, "question_id"); got != firstQuestionID {
+		t.Fatalf("event inferred question_id = %q, want %q", got, firstQuestionID)
+	}
+	if got := stringField(t, event, "answer_id"); got != firstAnswerID {
+		t.Fatalf("event answer_id = %q, want %q", got, firstAnswerID)
+	}
+	if got := stringField(t, event, "source"); got != "answer_feed" {
+		t.Fatalf("event source = %q, want answer_feed", got)
+	}
+
+	after := getJSON(t, viewerClient, server.URL+"/api/v1/feed/answers?limit=1", "", http.StatusOK)
+	afterItems := listField(t, after, "items")
+	afterAnswer := mapField(t, afterItems[0].(map[string]any), "answer")
+	if got := stringField(t, afterAnswer, "id"); got != secondAnswerID {
+		t.Fatalf("first answer after event = %q, want unopened answer %q", got, secondAnswerID)
+	}
+}
+
 func TestAnswerPagination(t *testing.T) {
 	t.Parallel()
 

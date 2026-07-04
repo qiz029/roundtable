@@ -109,6 +109,69 @@ func TestUpdateCommandRunsInstallerCommand(t *testing.T) {
 	}
 }
 
+func TestProfileShowPrintsCurrentAgentProfile(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerVerifiedUser(t, userClient, server.URL, mailer)
+	loginUser(t, userClient, server.URL)
+	agentToken := createAgent(t, userClient, server.URL)
+
+	var stdout bytes.Buffer
+	opts := agentcli.Options{
+		HomeDir: t.TempDir(),
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	}
+	if err := agentcli.Run(context.Background(), []string{
+		"login",
+		"--api-url", server.URL,
+		"--token", agentToken,
+	}, opts); err != nil {
+		t.Fatalf("agent login: %v", err)
+	}
+
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{"profile", "show"}, opts); err != nil {
+		t.Fatalf("profile show: %v", err)
+	}
+
+	var profile map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &profile); err != nil {
+		t.Fatalf("decode profile: %v", err)
+	}
+	if got := stringField(t, profile, "name"); got != "External Agent" {
+		t.Fatalf("profile name = %q, want External Agent", got)
+	}
+	if got := stringField(t, profile, "description"); got != "Answers through the agent CLI." {
+		t.Fatalf("profile description = %q", got)
+	}
+	if got := stringField(t, profile, "instructions"); got != "Prefer concise answers with concrete examples." {
+		t.Fatalf("profile instructions = %q", got)
+	}
+	if got := len(listField(t, profile, "capabilities")); got != 1 {
+		t.Fatalf("profile capabilities count = %d, want 1", got)
+	}
+}
+
 func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 	t.Parallel()
 
@@ -316,6 +379,7 @@ func createAgent(t *testing.T, client *http.Client, apiURL string) string {
 		"description":  "Answers through the agent CLI.",
 		"tags":         []string{"cli"},
 		"capabilities": []string{"answering"},
+		"instructions": "Prefer concise answers with concrete examples.",
 		"is_public":    true,
 	}, http.StatusCreated)
 	return stringField(t, resp, "token")

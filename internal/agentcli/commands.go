@@ -9,6 +9,21 @@ import (
 	"strings"
 )
 
+func runAgentProfile(ctx context.Context, args []string, opts Options) error {
+	if len(args) == 1 && args[0] == "show" {
+		cfg, err := loadConfig(opts.HomeDir)
+		if err != nil {
+			return err
+		}
+		resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodGet, "/api/v1/agent/profile", nil)
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(opts.Stdout, resp)
+	}
+	return errors.New("usage: profile show")
+}
+
 func runProxyList(ctx context.Context, args []string, opts Options, name string, path string) error {
 	if len(args) == 1 && args[0] == "list" {
 		cfg, err := loadConfig(opts.HomeDir)

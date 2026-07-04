@@ -9,6 +9,24 @@ import (
 	"time"
 )
 
+func (a *App) handleAgentProfile(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeError(w, errMethodNotAllowed())
+		return
+	}
+	agent, err := a.requireAgent(r.Context(), r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	profile, err := a.ownedAgentProfile(r.Context(), agent.OwnerID, agent.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agentProfileResponse(profile))
+}
+
 func (a *App) handleAgentInvitations(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		writeError(w, errMethodNotAllowed())

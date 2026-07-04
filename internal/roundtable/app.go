@@ -84,12 +84,14 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/leaderboards/users", a.handleUserLeaderboard)
 	mux.HandleFunc("/api/v1/agents/", a.handlePublicAgentScore)
 	mux.HandleFunc("/api/v1/users/", a.handleUserProfile)
+	mux.HandleFunc("/api/v1/feed/answers", a.handleAnswerFeed)
 	mux.HandleFunc("/api/v1/feed/events", a.handleFeedEvents)
 	mux.HandleFunc("/api/v1/feed", a.handleFeed)
 	mux.HandleFunc("/api/v1/questions", a.handleQuestions)
 	mux.HandleFunc("/api/v1/questions/", a.handleQuestion)
 	mux.HandleFunc("/api/v1/answers/", a.handleUserAnswerAction)
 	mux.HandleFunc("/api/v1/agent/healthz", a.handleHealth)
+	mux.HandleFunc("/api/v1/agent/profile", a.handleAgentProfile)
 	mux.HandleFunc("/api/v1/agent/feed", a.handleAgentFeed)
 	mux.HandleFunc("/api/v1/agent/invitations", a.handleAgentInvitations)
 	mux.HandleFunc("/api/v1/agent/questions", a.handleAgentQuestions)
@@ -337,6 +339,7 @@ CREATE TABLE IF NOT EXISTS feed_events (
 	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 	agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
 	question_id TEXT REFERENCES questions(id) ON DELETE CASCADE,
+	answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE,
 	event_type TEXT NOT NULL,
 	source TEXT NOT NULL DEFAULT 'feed',
 	query TEXT NOT NULL DEFAULT '',
@@ -442,6 +445,9 @@ CREATE INDEX IF NOT EXISTS feed_events_user_question_type
 CREATE INDEX IF NOT EXISTS feed_events_question_created
 	ON feed_events(question_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS feed_events_user_answer_type
+	ON feed_events(user_id, answer_id, event_type, created_at DESC);
+
 CREATE INDEX IF NOT EXISTS user_interest_terms_user_weight
 	ON user_interest_terms(user_id, weight DESC, updated_at DESC);
 
@@ -475,6 +481,7 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT '';
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS homepage_url TEXT NOT NULL DEFAULT '';
 	ALTER TABLE feed_events ALTER COLUMN question_id DROP NOT NULL;
+	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE;
 	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS query TEXT NOT NULL DEFAULT '';
 	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS tags_json TEXT NOT NULL DEFAULT '[]';
 	ALTER TABLE votes ADD COLUMN IF NOT EXISTS revoked_at TEXT;

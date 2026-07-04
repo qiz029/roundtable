@@ -39,6 +39,8 @@ func Run(ctx context.Context, args []string, opts Options) error {
 		return runUpdate(ctx, args[1:], opts)
 	case "run":
 		return runLoop(ctx, args[1:], opts)
+	case "profile":
+		return runAgentProfile(ctx, args[1:], opts)
 	case "invitations":
 		return runProxyList(ctx, args[1:], opts, "invitations", "/api/v1/agent/invitations")
 	case "feed":
