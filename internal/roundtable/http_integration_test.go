@@ -879,6 +879,66 @@ func TestQuestionSearchMatchesTitleAndBody(t *testing.T) {
 	}
 }
 
+func TestQuestionListFiltersByTags(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
+	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "owner@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+
+	tagMatch := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Mercury rollout",
+		"body":  "How should we stage this deployment?",
+		"tags":  []string{"Backend", "release"},
+	}, http.StatusCreated)
+	textMatch := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Backend roadmap",
+		"body":  "This question should only match full text search.",
+		"tags":  []string{"product"},
+	}, http.StatusCreated)
+	postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Frontend polish",
+		"body":  "This question should not match topic filters.",
+		"tags":  []string{"backend-tools"},
+	}, http.StatusCreated)
+
+	byQ := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?q=backend", "", http.StatusOK)
+	assertQuestionIDs(t, byQ, []string{stringField(t, textMatch, "id")})
+
+	byTag := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?tags=backend", "", http.StatusOK)
+	assertQuestionIDs(t, byTag, []string{stringField(t, tagMatch, "id")})
+
+	byHashtag := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?tags=%23backend", "", http.StatusOK)
+	assertQuestionIDs(t, byHashtag, []string{stringField(t, tagMatch, "id")})
+
+	intersection := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?q=mercury&tags=backend", "", http.StatusOK)
+	assertQuestionIDs(t, intersection, []string{stringField(t, tagMatch, "id")})
+
+	noIntersection := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?q=roadmap&tags=backend", "", http.StatusOK)
+	assertQuestionIDs(t, noIntersection, []string{})
+
+	multiTag := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?tags=backend&tags=release", "", http.StatusOK)
+	assertQuestionIDs(t, multiTag, []string{stringField(t, tagMatch, "id")})
+}
+
 func TestQuestionListPagination(t *testing.T) {
 	t.Parallel()
 
@@ -1183,6 +1243,19 @@ func TestQuestionSearchBackfillsExistingQuestions(t *testing.T) {
 	}, http.StatusCreated)
 	questionID := stringField(t, question, "id")
 	server.Close()
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM question_search_terms`); err != nil {
+		t.Fatalf("clear search terms: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `DELETE FROM question_tags`); err != nil {
+		t.Fatalf("clear question tags: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
 	if err := app.Close(); err != nil {
 		t.Fatalf("close app: %v", err)
 	}
@@ -1199,13 +1272,10 @@ func TestQuestionSearchBackfillsExistingQuestions(t *testing.T) {
 	defer reopenedServer.Close()
 
 	found := getJSON(t, newHTTPClient(t), reopenedServer.URL+"/api/v1/questions?q=backfill", "", http.StatusOK)
-	items := listField(t, found, "items")
-	if len(items) != 1 {
-		t.Fatalf("search result count after reopen = %d, want 1", len(items))
-	}
-	if got := stringField(t, items[0].(map[string]any), "id"); got != questionID {
-		t.Fatalf("search result id after reopen = %q, want %q", got, questionID)
-	}
+	assertQuestionIDs(t, found, []string{questionID})
+
+	foundByTag := getJSON(t, newHTTPClient(t), reopenedServer.URL+"/api/v1/questions?tags=search", "", http.StatusOK)
+	assertQuestionIDs(t, foundByTag, []string{questionID})
 }
 
 func TestQuestionInvitesAtMostFiveAgents(t *testing.T) {
@@ -2007,6 +2077,24 @@ func leaderboardUserScore(t *testing.T, leaderboard map[string]any, userID strin
 	}
 	t.Fatalf("user %s was not present in leaderboard %#v", userID, leaderboard)
 	return nil
+}
+
+func assertQuestionIDs(t *testing.T, values map[string]any, want []string) {
+	t.Helper()
+
+	items := listField(t, values, "items")
+	if len(items) != len(want) {
+		t.Fatalf("question count = %d, want %d, items = %#v", len(items), len(want), items)
+	}
+	got := map[string]bool{}
+	for _, item := range items {
+		got[stringField(t, item.(map[string]any), "id")] = true
+	}
+	for _, id := range want {
+		if !got[id] {
+			t.Fatalf("question ids = %#v, missing %s", got, id)
+		}
+	}
 }
 
 func listField(t *testing.T, values map[string]any, name string) []any {

@@ -75,6 +75,10 @@ func (a *App) createQuestion(w http.ResponseWriter, r *http.Request, user curren
 		writeError(w, err)
 		return
 	}
+	if err := a.indexQuestionTags(r.Context(), tx, questionID, decodeStringList(tags)); err != nil {
+		writeError(w, err)
+		return
+	}
 	invitationCount, err := a.createRandomInvitations(r.Context(), tx, questionID, decodeStringList(tags), now)
 	if err != nil {
 		writeError(w, err)
@@ -270,27 +274,54 @@ func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var rows *sql.Rows
-	if searching {
-		args := make([]any, 0, len(terms)+3)
-		for _, term := range terms {
-			args = append(args, term)
+	tagFilters := questionListTagFilters(r)
+	if searching || len(tagFilters) > 0 {
+		args := make([]any, 0, len(terms)+len(tagFilters)+4)
+		joins := []string{}
+		if searching {
+			start := len(args) + 1
+			for _, term := range terms {
+				args = append(args, term)
+			}
+			args = append(args, len(terms))
+			joins = append(joins, `
+				JOIN (
+					SELECT question_id
+					FROM question_search_terms
+					WHERE term IN (`+placeholders(start, len(terms))+`)
+					GROUP BY question_id
+					HAVING COUNT(DISTINCT term) = `+placeholder(len(args))+`
+				) matches ON matches.question_id = q.id
+			`)
 		}
-		args = append(args, len(terms), page.Limit+1, page.Offset)
+		if len(tagFilters) > 0 {
+			start := len(args) + 1
+			for _, tag := range tagFilters {
+				args = append(args, tag)
+			}
+			args = append(args, len(tagFilters))
+			joins = append(joins, `
+				JOIN (
+					SELECT question_id
+					FROM question_tags
+					WHERE tag IN (`+placeholders(start, len(tagFilters))+`)
+					GROUP BY question_id
+					HAVING COUNT(DISTINCT tag) = `+placeholder(len(args))+`
+				) tag_matches ON tag_matches.question_id = q.id
+			`)
+		}
+		args = append(args, page.Limit+1, page.Offset)
+		limitPlaceholder := placeholder(len(args) - 1)
+		offsetPlaceholder := placeholder(len(args))
 		rows, err = a.db.QueryContext(r.Context(), `
-			SELECT q.id, q.title, q.body, q.tags_json, q.created_at, u.display_name,
-				(SELECT COUNT(*) FROM answers WHERE question_id = q.id) AS answer_count
-			FROM questions q
-			JOIN users u ON u.id = q.author_user_id
-			JOIN (
-				SELECT question_id
-				FROM question_search_terms
-				WHERE term IN (`+placeholders(1, len(terms))+`)
-				GROUP BY question_id
-				HAVING COUNT(DISTINCT term) = `+placeholder(len(terms)+1)+`
-			) matches ON matches.question_id = q.id
-			ORDER BY q.created_at DESC
-			LIMIT `+placeholder(len(terms)+2)+` OFFSET `+placeholder(len(terms)+3)+`
-		`, args...)
+					SELECT q.id, q.title, q.body, q.tags_json, q.created_at, u.display_name,
+						(SELECT COUNT(*) FROM answers WHERE question_id = q.id) AS answer_count
+				FROM questions q
+				JOIN users u ON u.id = q.author_user_id
+				`+strings.Join(joins, "\n")+`
+				ORDER BY q.created_at DESC
+				LIMIT `+limitPlaceholder+` OFFSET `+offsetPlaceholder+`
+			`, args...)
 	} else {
 		rows, err = a.db.QueryContext(r.Context(), `
 		SELECT q.id, q.title, q.body, q.tags_json, q.created_at, u.display_name,
@@ -345,6 +376,15 @@ func questionListSearchTerms(r *http.Request) ([]string, bool) {
 		return nil, false
 	}
 	return questionSearchTerms(raw), true
+}
+
+func questionListTagFilters(r *http.Request) []string {
+	rawValues := r.URL.Query()["tags"]
+	values := []string{}
+	for _, raw := range rawValues {
+		values = append(values, strings.Split(raw, ",")...)
+	}
+	return normalizedQuestionTags(values)
 }
 
 func placeholder(position int) string {

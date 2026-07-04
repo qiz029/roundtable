@@ -512,6 +512,7 @@ paths:
       summary: List public questions
       parameters:
         - $ref: "#/components/parameters/QuestionSearch"
+        - $ref: "#/components/parameters/QuestionTags"
         - $ref: "#/components/parameters/PageLimit"
         - $ref: "#/components/parameters/PageOffset"
       responses:
@@ -821,6 +822,17 @@ components:
       description: Search public questions by title and body terms.
       schema:
         type: string
+    QuestionTags:
+      name: tags
+      in: query
+      required: false
+      description: Filter public questions by exact normalized tag. Repeat to require multiple tags.
+      style: form
+      explode: true
+      schema:
+        type: array
+        items:
+          type: string
     PageLimit:
       name: limit
       in: query

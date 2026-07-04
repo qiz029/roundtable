@@ -102,6 +102,9 @@ func (a *App) migrate(ctx context.Context) error {
 	if _, err := a.db.ExecContext(ctx, schemaSQL); err != nil {
 		return fmt.Errorf("migrate postgres: %w", err)
 	}
+	if err := a.rebuildQuestionTagIndex(ctx); err != nil {
+		return fmt.Errorf("rebuild question tag index: %w", err)
+	}
 	if err := a.rebuildQuestionSearchIndex(ctx); err != nil {
 		return fmt.Errorf("rebuild question search index: %w", err)
 	}
@@ -303,6 +306,12 @@ CREATE TABLE IF NOT EXISTS question_search_terms (
 	PRIMARY KEY(term, question_id)
 );
 
+CREATE TABLE IF NOT EXISTS question_tags (
+	question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+	tag TEXT NOT NULL,
+	PRIMARY KEY(tag, question_id)
+);
+
 CREATE TABLE IF NOT EXISTS invitations (
 	id TEXT PRIMARY KEY,
 	question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
@@ -437,6 +446,9 @@ CREATE INDEX IF NOT EXISTS votes_answer_active
 
 	CREATE INDEX IF NOT EXISTS question_search_terms_question
 		ON question_search_terms(question_id);
+
+	CREATE INDEX IF NOT EXISTS question_tags_question
+		ON question_tags(question_id);
 
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT '';
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
