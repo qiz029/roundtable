@@ -33,16 +33,32 @@ func (a *App) handleMyAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agentID, action, ok := twoPartAction(r.URL.Path, "/api/v1/me/agents/")
-	if !ok || action != "token" {
+	tail := pathTail(r.URL.Path, "/api/v1/me/agents/")
+	if tail == "" {
 		writeError(w, errNotFound("agent action not found"))
 		return
 	}
-	if r.Method != http.MethodPost {
-		writeError(w, errMethodNotAllowed())
+	parts := strings.Split(tail, "/")
+	if len(parts) == 1 && parts[0] != "" {
+		switch r.Method {
+		case http.MethodGet:
+			a.getMyAgent(w, r, user, parts[0])
+		case http.MethodPatch:
+			a.updateAgentProfile(w, r, user, parts[0])
+		default:
+			writeError(w, errMethodNotAllowed())
+		}
 		return
 	}
-	a.resetAgentToken(w, r, user, agentID)
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "token" {
+		if r.Method != http.MethodPost {
+			writeError(w, errMethodNotAllowed())
+			return
+		}
+		a.resetAgentToken(w, r, user, parts[0])
+		return
+	}
+	writeError(w, errNotFound("agent action not found"))
 }
 
 func (a *App) createAgent(w http.ResponseWriter, r *http.Request, user currentUser) {
@@ -105,20 +121,26 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request, user currentUs
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
-		"id":           agentID,
-		"name":         name,
-		"description":  strings.TrimSpace(req.Description),
-		"tags":         decodeStringList(tags),
-		"capabilities": decodeStringList(capabilities),
-		"is_public":    req.IsPublic,
-		"token":        agentToken,
+	resp := agentProfileResponse(ownedAgentProfile{
+		ID:              agentID,
+		Name:            name,
+		Description:     strings.TrimSpace(req.Description),
+		TagsRaw:         tags,
+		CapabilitiesRaw: capabilities,
+		Instructions:    strings.TrimSpace(req.Instructions),
+		HomepageURL:     strings.TrimSpace(req.HomepageURL),
+		IsPublic:        req.IsPublic,
+		Status:          "active",
+		CreatedAt:       now,
 	})
+	resp["token"] = agentToken
+	writeJSON(w, http.StatusCreated, resp)
 }
 
 func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentUser) {
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT id, name, description, tags_json, capabilities_json, is_public, status, created_at
+		SELECT id, name, description, tags_json, capabilities_json,
+			instructions, homepage_url, is_public, status, created_at
 		FROM agents
 		WHERE owner_user_id = $1
 		ORDER BY created_at DESC
@@ -131,24 +153,151 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 
 	items := []map[string]any{}
 	for rows.Next() {
-		var id, name, description, tagsRaw, capabilitiesRaw, status, createdAt string
-		var isPublic bool
-		if err := rows.Scan(&id, &name, &description, &tagsRaw, &capabilitiesRaw, &isPublic, &status, &createdAt); err != nil {
+		var profile ownedAgentProfile
+		if err := rows.Scan(&profile.ID, &profile.Name, &profile.Description, &profile.TagsRaw,
+			&profile.CapabilitiesRaw, &profile.Instructions, &profile.HomepageURL,
+			&profile.IsPublic, &profile.Status, &profile.CreatedAt); err != nil {
 			writeError(w, err)
 			return
 		}
-		items = append(items, map[string]any{
-			"id":           id,
-			"name":         name,
-			"description":  description,
-			"tags":         decodeStringList(tagsRaw),
-			"capabilities": decodeStringList(capabilitiesRaw),
-			"is_public":    isPublic,
-			"status":       status,
-			"created_at":   createdAt,
-		})
+		items = append(items, agentProfileResponse(profile))
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+type ownedAgentProfile struct {
+	ID              string
+	Name            string
+	Description     string
+	TagsRaw         string
+	CapabilitiesRaw string
+	Instructions    string
+	HomepageURL     string
+	IsPublic        bool
+	Status          string
+	CreatedAt       string
+}
+
+func (a *App) getMyAgent(w http.ResponseWriter, r *http.Request, user currentUser, agentID string) {
+	profile, err := a.ownedAgentProfile(r.Context(), user.ID, agentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, errNotFound("agent not found"))
+			return
+		}
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, agentProfileResponse(profile))
+}
+
+func (a *App) updateAgentProfile(w http.ResponseWriter, r *http.Request, user currentUser, agentID string) {
+	profile, err := a.ownedAgentProfile(r.Context(), user.ID, agentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, errNotFound("agent not found"))
+			return
+		}
+		writeError(w, err)
+		return
+	}
+
+	var req struct {
+		Name         *string  `json:"name"`
+		Description  *string  `json:"description"`
+		Tags         []string `json:"tags"`
+		Capabilities []string `json:"capabilities"`
+		Instructions *string  `json:"instructions"`
+		HomepageURL  *string  `json:"homepage_url"`
+		IsPublic     *bool    `json:"is_public"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, errInvalidInput("name cannot be blank"))
+			return
+		}
+		profile.Name = name
+	}
+	if req.Description != nil {
+		profile.Description = strings.TrimSpace(*req.Description)
+	}
+	if req.Tags != nil {
+		tags, err := encodeStringList(req.Tags)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		profile.TagsRaw = tags
+	}
+	if req.Capabilities != nil {
+		capabilities, err := encodeStringList(req.Capabilities)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		profile.CapabilitiesRaw = capabilities
+	}
+	if req.Instructions != nil {
+		profile.Instructions = strings.TrimSpace(*req.Instructions)
+	}
+	if req.HomepageURL != nil {
+		profile.HomepageURL = strings.TrimSpace(*req.HomepageURL)
+	}
+	if req.IsPublic != nil {
+		profile.IsPublic = *req.IsPublic
+	}
+
+	if _, err := a.db.ExecContext(r.Context(), `
+		UPDATE agents
+		SET name = $1,
+			description = $2,
+			tags_json = $3,
+			capabilities_json = $4,
+			instructions = $5,
+			homepage_url = $6,
+			is_public = $7
+		WHERE id = $8 AND owner_user_id = $9
+	`, profile.Name, profile.Description, profile.TagsRaw, profile.CapabilitiesRaw,
+		profile.Instructions, profile.HomepageURL, profile.IsPublic, profile.ID, user.ID); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, agentProfileResponse(profile))
+}
+
+func (a *App) ownedAgentProfile(ctx context.Context, ownerUserID string, agentID string) (ownedAgentProfile, error) {
+	var profile ownedAgentProfile
+	err := a.db.QueryRowContext(ctx, `
+		SELECT id, name, description, tags_json, capabilities_json,
+			instructions, homepage_url, is_public, status, created_at
+		FROM agents
+		WHERE id = $1 AND owner_user_id = $2
+	`, agentID, ownerUserID).Scan(&profile.ID, &profile.Name, &profile.Description,
+		&profile.TagsRaw, &profile.CapabilitiesRaw, &profile.Instructions,
+		&profile.HomepageURL, &profile.IsPublic, &profile.Status, &profile.CreatedAt)
+	return profile, err
+}
+
+func agentProfileResponse(profile ownedAgentProfile) map[string]any {
+	return map[string]any{
+		"id":           profile.ID,
+		"name":         profile.Name,
+		"description":  profile.Description,
+		"tags":         decodeStringList(profile.TagsRaw),
+		"capabilities": decodeStringList(profile.CapabilitiesRaw),
+		"instructions": profile.Instructions,
+		"homepage_url": profile.HomepageURL,
+		"is_public":    profile.IsPublic,
+		"status":       profile.Status,
+		"created_at":   profile.CreatedAt,
+	}
 }
 
 func (a *App) resetAgentToken(w http.ResponseWriter, r *http.Request, user currentUser, agentID string) {

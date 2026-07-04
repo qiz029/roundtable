@@ -3,6 +3,7 @@ package roundtable_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -198,6 +199,354 @@ func TestRegisterCanRetryAfterVerificationEmailFailure(t *testing.T) {
 	postJSON(t, client, server.URL+"/api/v1/auth/verify", "", map[string]any{
 		"token": token,
 	}, http.StatusOK)
+}
+
+func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := newTestDatabaseURL(t)
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+
+	if _, err := db.ExecContext(context.Background(), `
+		CREATE TABLE users (
+			id TEXT PRIMARY KEY,
+			email TEXT NOT NULL UNIQUE,
+			display_name TEXT NOT NULL,
+			password_hash TEXT NOT NULL,
+			email_verified_at TEXT,
+			verification_token_hash TEXT,
+			status TEXT NOT NULL DEFAULT 'active',
+			created_at TEXT NOT NULL
+		);
+
+		CREATE TABLE agents (
+			id TEXT PRIMARY KEY,
+			owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			name TEXT NOT NULL,
+			description TEXT NOT NULL DEFAULT '',
+			tags_json TEXT NOT NULL DEFAULT '[]',
+			capabilities_json TEXT NOT NULL DEFAULT '[]',
+			is_public BOOLEAN NOT NULL DEFAULT TRUE,
+			status TEXT NOT NULL DEFAULT 'active',
+			token_hash TEXT NOT NULL UNIQUE,
+			created_at TEXT NOT NULL
+		);
+	`); err != nil {
+		t.Fatalf("seed old schema: %v", err)
+	}
+
+	app, err := roundtable.NewApp(roundtable.Options{
+		DatabaseURL: databaseURL,
+		Mailer:      roundtable.NewMemoryMailer(),
+	})
+	if err != nil {
+		t.Fatalf("new app with old schema: %v", err)
+	}
+	defer app.Close()
+
+	assertSelectable(t, db, `SELECT full_name, bio, background, avatar_url, website_url, social_links_json FROM users LIMIT 0`)
+	assertSelectable(t, db, `SELECT instructions, homepage_url FROM agents LIMIT 0`)
+	assertSelectable(t, db, `SELECT follower_user_id, followee_user_id, created_at FROM user_follows LIMIT 0`)
+}
+
+func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
+	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "owner@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+
+	initial := getJSON(t, userClient, server.URL+"/api/v1/me/profile", "", http.StatusOK)
+	userID := stringField(t, initial, "id")
+	if got := stringField(t, initial, "display_name"); got != "Owner" {
+		t.Fatalf("initial display_name = %q, want Owner", got)
+	}
+	if got := initial["email"]; got != "owner@example.com" {
+		t.Fatalf("initial email = %#v, want owner@example.com", got)
+	}
+	if got := len(listField(t, initial, "social_links")); got != 0 {
+		t.Fatalf("initial social_links count = %d, want 0", got)
+	}
+	if got := intField(t, initial, "follower_count"); got != 0 {
+		t.Fatalf("initial follower_count = %d, want 0", got)
+	}
+	if got := intField(t, initial, "following_count"); got != 0 {
+		t.Fatalf("initial following_count = %d, want 0", got)
+	}
+
+	updated := patchJSON(t, userClient, server.URL+"/api/v1/me/profile", "", map[string]any{
+		"display_name": "Owner Renamed",
+		"full_name":    "Ada Lovelace",
+		"bio":          "Builds agent collaboration tools.",
+		"background":   "Distributed systems and developer tooling.",
+		"avatar_url":   "https://example.com/avatar.png",
+		"website_url":  "https://example.com",
+		"social_links": []map[string]any{
+			{"label": "GitHub", "url": "https://github.com/example"},
+			{"label": "LinkedIn", "url": "https://linkedin.com/in/example"},
+		},
+	}, http.StatusOK)
+	if got := stringField(t, updated, "display_name"); got != "Owner Renamed" {
+		t.Fatalf("updated display_name = %q, want Owner Renamed", got)
+	}
+	if got := stringField(t, updated, "full_name"); got != "Ada Lovelace" {
+		t.Fatalf("updated full_name = %q, want Ada Lovelace", got)
+	}
+	if got := stringField(t, updated, "background"); got != "Distributed systems and developer tooling." {
+		t.Fatalf("updated background = %q", got)
+	}
+	links := listField(t, updated, "social_links")
+	if len(links) != 2 {
+		t.Fatalf("updated social_links count = %d, want 2", len(links))
+	}
+	firstLink := links[0].(map[string]any)
+	if got := firstLink["label"]; got != "GitHub" {
+		t.Fatalf("first social link label = %#v, want GitHub", got)
+	}
+
+	me := getJSON(t, userClient, server.URL+"/api/v1/auth/me", "", http.StatusOK)
+	if got := stringField(t, me, "display_name"); got != "Owner Renamed" {
+		t.Fatalf("auth/me display_name = %q, want Owner Renamed", got)
+	}
+
+	public := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/"+userID+"/profile", "", http.StatusOK)
+	if got := stringField(t, public, "display_name"); got != "Owner Renamed" {
+		t.Fatalf("public display_name = %q, want Owner Renamed", got)
+	}
+	if _, ok := public["email"]; ok {
+		t.Fatalf("public profile leaked email: %#v", public)
+	}
+	if got := len(listField(t, public, "social_links")); got != 2 {
+		t.Fatalf("public social_links count = %d, want 2", got)
+	}
+
+	badLink := patchJSON(t, userClient, server.URL+"/api/v1/me/profile", "", map[string]any{
+		"social_links": []map[string]any{{"label": "GitHub"}},
+	}, http.StatusBadRequest)
+	if got := badLink["message"]; got != "social_links entries require label and url" {
+		t.Fatalf("bad social link message = %#v", got)
+	}
+
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/usr_missing/profile", "", http.StatusNotFound)
+}
+
+func TestUserFollowFlow(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	targetClient := newHTTPClient(t)
+	registerAndVerifyUser(t, targetClient, server.URL, mailer, "target@example.com")
+	postJSON(t, targetClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "target@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+	targetProfile := getJSON(t, targetClient, server.URL+"/api/v1/me/profile", "", http.StatusOK)
+	targetUserID := stringField(t, targetProfile, "id")
+
+	followerClient := newHTTPClient(t)
+	registerAndVerifyUser(t, followerClient, server.URL, mailer, "follower@example.com")
+	postJSON(t, followerClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "follower@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+	followerProfile := getJSON(t, followerClient, server.URL+"/api/v1/me/profile", "", http.StatusOK)
+	followerUserID := stringField(t, followerProfile, "id")
+
+	follow := postJSON(t, followerClient, server.URL+"/api/v1/users/"+targetUserID+"/follow", "", nil, http.StatusOK)
+	if !boolField(t, follow, "following") {
+		t.Fatalf("follow following = false, want true")
+	}
+	if got := intField(t, follow, "follower_count"); got != 1 {
+		t.Fatalf("follow follower_count = %d, want 1", got)
+	}
+	repeatedFollow := postJSON(t, followerClient, server.URL+"/api/v1/users/"+targetUserID+"/follow", "", nil, http.StatusOK)
+	if got := intField(t, repeatedFollow, "follower_count"); got != 1 {
+		t.Fatalf("repeated follow follower_count = %d, want 1", got)
+	}
+
+	publicTarget := getJSON(t, followerClient, server.URL+"/api/v1/users/"+targetUserID+"/profile", "", http.StatusOK)
+	if got := intField(t, publicTarget, "follower_count"); got != 1 {
+		t.Fatalf("public follower_count = %d, want 1", got)
+	}
+	if !boolField(t, publicTarget, "viewer_following") {
+		t.Fatalf("viewer_following = false, want true")
+	}
+	followerProfile = getJSON(t, followerClient, server.URL+"/api/v1/me/profile", "", http.StatusOK)
+	if got := intField(t, followerProfile, "following_count"); got != 1 {
+		t.Fatalf("follower following_count = %d, want 1", got)
+	}
+
+	followers := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/"+targetUserID+"/followers", "", http.StatusOK)
+	followerItems := listField(t, followers, "items")
+	if len(followerItems) != 1 {
+		t.Fatalf("followers count = %d, want 1", len(followerItems))
+	}
+	if got := stringField(t, followerItems[0].(map[string]any), "id"); got != followerUserID {
+		t.Fatalf("followers[0].id = %q, want %q", got, followerUserID)
+	}
+
+	following := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/"+followerUserID+"/following", "", http.StatusOK)
+	followingItems := listField(t, following, "items")
+	if len(followingItems) != 1 {
+		t.Fatalf("following count = %d, want 1", len(followingItems))
+	}
+	if got := stringField(t, followingItems[0].(map[string]any), "id"); got != targetUserID {
+		t.Fatalf("following[0].id = %q, want %q", got, targetUserID)
+	}
+
+	selfFollow := postJSON(t, followerClient, server.URL+"/api/v1/users/"+followerUserID+"/follow", "", nil, http.StatusBadRequest)
+	if got := selfFollow["message"]; got != "cannot follow yourself" {
+		t.Fatalf("self follow message = %#v, want cannot follow yourself", got)
+	}
+	postJSON(t, followerClient, server.URL+"/api/v1/users/usr_missing/follow", "", nil, http.StatusNotFound)
+
+	unfollow := deleteJSON(t, followerClient, server.URL+"/api/v1/users/"+targetUserID+"/follow", "", http.StatusOK)
+	if boolField(t, unfollow, "following") {
+		t.Fatalf("unfollow following = true, want false")
+	}
+	if got := intField(t, unfollow, "follower_count"); got != 0 {
+		t.Fatalf("unfollow follower_count = %d, want 0", got)
+	}
+	repeatedUnfollow := deleteJSON(t, followerClient, server.URL+"/api/v1/users/"+targetUserID+"/follow", "", http.StatusOK)
+	if got := intField(t, repeatedUnfollow, "follower_count"); got != 0 {
+		t.Fatalf("repeated unfollow follower_count = %d, want 0", got)
+	}
+
+	publicTarget = getJSON(t, followerClient, server.URL+"/api/v1/users/"+targetUserID+"/profile", "", http.StatusOK)
+	if got := intField(t, publicTarget, "follower_count"); got != 0 {
+		t.Fatalf("public follower_count after unfollow = %d, want 0", got)
+	}
+	if boolField(t, publicTarget, "viewer_following") {
+		t.Fatalf("viewer_following after unfollow = true, want false")
+	}
+
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/usr_missing/followers", "", http.StatusNotFound)
+}
+
+func TestOwnedAgentProfileGetAndPatch(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
+	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "owner@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+
+	created := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Profile Agent",
+		"description":  "Original description.",
+		"tags":         []string{"profile"},
+		"capabilities": []string{"answering"},
+		"instructions": "Original private instructions.",
+		"homepage_url": "https://example.com/agent",
+		"is_public":    true,
+	}, http.StatusCreated)
+	agentID := stringField(t, created, "id")
+	_ = stringField(t, created, "token")
+	if got := stringField(t, created, "instructions"); got != "Original private instructions." {
+		t.Fatalf("created instructions = %q", got)
+	}
+
+	detail := getJSON(t, userClient, server.URL+"/api/v1/me/agents/"+agentID, "", http.StatusOK)
+	if got := stringField(t, detail, "homepage_url"); got != "https://example.com/agent" {
+		t.Fatalf("agent homepage_url = %q", got)
+	}
+
+	updated := patchJSON(t, userClient, server.URL+"/api/v1/me/agents/"+agentID, "", map[string]any{
+		"name":         "Updated Profile Agent",
+		"description":  "Updated description.",
+		"tags":         []string{"profile", "updated"},
+		"capabilities": []string{"answering", "review"},
+		"instructions": "Updated private instructions.",
+		"homepage_url": "https://example.com/agent-updated",
+		"is_public":    false,
+	}, http.StatusOK)
+	if got := stringField(t, updated, "name"); got != "Updated Profile Agent" {
+		t.Fatalf("updated name = %q, want Updated Profile Agent", got)
+	}
+	if boolField(t, updated, "is_public") {
+		t.Fatalf("updated is_public = true, want false")
+	}
+	if got := len(listField(t, updated, "tags")); got != 2 {
+		t.Fatalf("updated tags count = %d, want 2", got)
+	}
+
+	list := getJSON(t, userClient, server.URL+"/api/v1/me/agents", "", http.StatusOK)
+	items := listField(t, list, "items")
+	if len(items) != 1 {
+		t.Fatalf("agent list count = %d, want 1", len(items))
+	}
+	listed := items[0].(map[string]any)
+	if got := stringField(t, listed, "instructions"); got != "Updated private instructions." {
+		t.Fatalf("listed instructions = %q", got)
+	}
+
+	resetResp := postJSON(t, userClient, server.URL+"/api/v1/me/agents/"+agentID+"/token", "", nil, http.StatusOK)
+	if got := stringField(t, resetResp, "id"); got != agentID {
+		t.Fatalf("reset id = %q, want %q", got, agentID)
+	}
+
+	otherClient := newHTTPClient(t)
+	registerAndVerifyUser(t, otherClient, server.URL, mailer, "other@example.com")
+	postJSON(t, otherClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "other@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+	patchJSON(t, otherClient, server.URL+"/api/v1/me/agents/"+agentID, "", map[string]any{
+		"name": "Hijacked",
+	}, http.StatusNotFound)
 }
 
 func TestQuestionSearchMatchesTitleAndBody(t *testing.T) {
@@ -592,6 +941,7 @@ func TestAnonymousUserCanOnlyReadQuestionsAndAnswers(t *testing.T) {
 	assertLoginRequired(t, postRawJSON(t, anonymousClient, server.URL+"/api/v1/me/agents", map[string]any{
 		"name": "Blocked Agent",
 	}), "login required to manage agents")
+	assertLoginRequired(t, postRawJSON(t, anonymousClient, server.URL+"/api/v1/users/usr_missing/follow", nil), "login required to follow users")
 	assertLoginRequired(t, postRawJSON(t, anonymousClient, server.URL+"/api/v1/answers/"+answerID+"/like", nil), "login required to like answers")
 }
 
@@ -734,7 +1084,7 @@ func TestCORSAllowsBrowserFrontend(t *testing.T) {
 	}
 	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Origin", "http://localhost:5173")
 	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Credentials", "true")
-	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
+	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Headers", "content-type, authorization")
 	assertCORSHeader(t, preflightResp.Header(), "Vary", "Origin")
 
@@ -756,6 +1106,16 @@ func assertCORSHeader(t *testing.T, header http.Header, name string, want string
 	if got := header.Get(name); got != want {
 		t.Fatalf("%s = %q, want %q", name, got, want)
 	}
+}
+
+func assertSelectable(t *testing.T, db *sql.DB, query string) {
+	t.Helper()
+
+	rows, err := db.QueryContext(context.Background(), query)
+	if err != nil {
+		t.Fatalf("query %q: %v", query, err)
+	}
+	_ = rows.Close()
 }
 
 func registerAndVerifyUser(t *testing.T, client *http.Client, apiURL string, mailer *roundtable.MemoryMailer, email string) {
@@ -917,6 +1277,69 @@ func postJSON(t *testing.T, client *http.Client, url string, bearerToken string,
 	}
 	if resp.StatusCode != wantStatus {
 		t.Fatalf("post %s status = %d, want %d, body = %#v", url, resp.StatusCode, wantStatus, decoded)
+	}
+	return decoded
+}
+
+func patchJSON(t *testing.T, client *http.Client, url string, bearerToken string, body map[string]any, wantStatus int) map[string]any {
+	t.Helper()
+
+	var payload []byte
+	if body != nil {
+		var err error
+		payload, err = json.Marshal(body)
+		if err != nil {
+			t.Fatalf("marshal body: %v", err)
+		}
+	}
+	req, err := http.NewRequest(http.MethodPatch, url, bytes.NewReader(payload))
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("patch %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	var decoded map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("patch %s status = %d, want %d, body = %#v", url, resp.StatusCode, wantStatus, decoded)
+	}
+	return decoded
+}
+
+func deleteJSON(t *testing.T, client *http.Client, url string, bearerToken string, wantStatus int) map[string]any {
+	t.Helper()
+
+	req, err := http.NewRequest(http.MethodDelete, url, nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("delete %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	var decoded map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("delete %s status = %d, want %d, body = %#v", url, resp.StatusCode, wantStatus, decoded)
 	}
 	return decoded
 }

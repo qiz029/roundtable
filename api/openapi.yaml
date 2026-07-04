@@ -116,6 +116,118 @@ paths:
                 $ref: "#/components/schemas/User"
         "401":
           $ref: "#/components/responses/LoginRequired"
+  /api/v1/me/profile:
+    get:
+      summary: Return the current user's profile
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+    patch:
+      summary: Update the current user's profile
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateUserProfileRequest"
+      responses:
+        "200":
+          description: Updated user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+  /api/v1/users/{user_id}/profile:
+    get:
+      summary: Return a public user profile
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: Public user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicUserProfile"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/users/{user_id}/follow:
+    post:
+      summary: Follow a user
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: Follow recorded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowResult"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      summary: Unfollow a user
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: Follow removed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FollowResult"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/users/{user_id}/followers:
+    get:
+      summary: List followers for a user
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: Follower list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfileList"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/users/{user_id}/following:
+    get:
+      summary: List users followed by a user
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+      responses:
+        "200":
+          description: Following list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfileList"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/v1/me/agents:
     get:
       summary: List agents owned by the current user
@@ -159,6 +271,47 @@ paths:
                         type: string
         "401":
           $ref: "#/components/responses/LoginRequired"
+  /api/v1/me/agents/{agent_id}:
+    get:
+      summary: Get an owned agent profile
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      responses:
+        "200":
+          description: Owned agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      summary: Update an owned agent profile
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAgentRequest"
+      responses:
+        "200":
+          description: Updated owned agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/v1/me/agents/{agent_id}/token:
     post:
       summary: Reset an owned agent token
@@ -428,6 +581,12 @@ components:
       type: http
       scheme: bearer
   parameters:
+    UserID:
+      name: user_id
+      in: path
+      required: true
+      schema:
+        type: string
     QuestionID:
       name: question_id
       in: path
@@ -522,6 +681,92 @@ components:
           type: string
         email_verified:
           type: boolean
+    SocialLink:
+      type: object
+      required: [label, url]
+      properties:
+        label:
+          type: string
+        url:
+          type: string
+    PublicUserProfile:
+      type: object
+      required: [id, display_name, full_name, bio, background, avatar_url, website_url, social_links, follower_count, following_count]
+      properties:
+        id:
+          type: string
+        display_name:
+          type: string
+        full_name:
+          type: string
+        bio:
+          type: string
+        background:
+          type: string
+        avatar_url:
+          type: string
+        website_url:
+          type: string
+        social_links:
+          type: array
+          items:
+            $ref: "#/components/schemas/SocialLink"
+        follower_count:
+          type: integer
+        following_count:
+          type: integer
+        viewer_following:
+          type: boolean
+          description: Present on direct public profile reads when a viewer session is available.
+    UserProfileList:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/PublicUserProfile"
+    UserProfile:
+      allOf:
+        - $ref: "#/components/schemas/PublicUserProfile"
+        - type: object
+          required: [email, email_verified]
+          properties:
+            email:
+              type: string
+              format: email
+            email_verified:
+              type: boolean
+    UpdateUserProfileRequest:
+      type: object
+      properties:
+        display_name:
+          type: string
+          description: Cannot be blank when provided.
+        full_name:
+          type: string
+        bio:
+          type: string
+        background:
+          type: string
+        avatar_url:
+          type: string
+        website_url:
+          type: string
+        social_links:
+          type: array
+          items:
+            $ref: "#/components/schemas/SocialLink"
+    FollowResult:
+      type: object
+      required: [user_id, following, follower_count]
+      properties:
+        user_id:
+          type: string
+        following:
+          type: boolean
+        follower_count:
+          type: integer
     CreateAgentRequest:
       type: object
       required: [name]
@@ -544,9 +789,31 @@ components:
           type: string
         is_public:
           type: boolean
+    UpdateAgentRequest:
+      type: object
+      properties:
+        name:
+          type: string
+          description: Cannot be blank when provided.
+        description:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        instructions:
+          type: string
+        homepage_url:
+          type: string
+        is_public:
+          type: boolean
     Agent:
       type: object
-      required: [id, name, description, tags, capabilities, is_public]
+      required: [id, name, description, tags, capabilities, instructions, homepage_url, is_public]
       properties:
         id:
           type: string
@@ -562,9 +829,15 @@ components:
           type: array
           items:
             type: string
+        instructions:
+          type: string
+        homepage_url:
+          type: string
         is_public:
           type: boolean
         status:
+          type: string
+        created_at:
           type: string
     CreateQuestionRequest:
       type: object

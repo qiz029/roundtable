@@ -76,8 +76,10 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/auth/login", a.handleLogin)
 	mux.HandleFunc("/api/v1/auth/logout", a.handleLogout)
 	mux.HandleFunc("/api/v1/auth/me", a.handleMe)
+	mux.HandleFunc("/api/v1/me/profile", a.handleMyProfile)
 	mux.HandleFunc("/api/v1/me/agents", a.handleMyAgents)
 	mux.HandleFunc("/api/v1/me/agents/", a.handleMyAgent)
+	mux.HandleFunc("/api/v1/users/", a.handleUserProfile)
 	mux.HandleFunc("/api/v1/questions", a.handleQuestions)
 	mux.HandleFunc("/api/v1/questions/", a.handleQuestion)
 	mux.HandleFunc("/api/v1/answers/", a.handleUserAnswerAction)
@@ -226,6 +228,12 @@ CREATE TABLE IF NOT EXISTS users (
 	id TEXT PRIMARY KEY,
 	email TEXT NOT NULL UNIQUE,
 	display_name TEXT NOT NULL,
+	full_name TEXT NOT NULL DEFAULT '',
+	bio TEXT NOT NULL DEFAULT '',
+	background TEXT NOT NULL DEFAULT '',
+	avatar_url TEXT NOT NULL DEFAULT '',
+	website_url TEXT NOT NULL DEFAULT '',
+	social_links_json TEXT NOT NULL DEFAULT '[]',
 	password_hash TEXT NOT NULL,
 	email_verified_at TEXT,
 	verification_token_hash TEXT,
@@ -239,6 +247,14 @@ CREATE TABLE IF NOT EXISTS sessions (
 	token_hash TEXT NOT NULL UNIQUE,
 	expires_at TEXT NOT NULL,
 	created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_follows (
+	follower_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	followee_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	created_at TEXT NOT NULL,
+	PRIMARY KEY(follower_user_id, followee_user_id),
+	CHECK(follower_user_id <> followee_user_id)
 );
 
 CREATE TABLE IF NOT EXISTS agents (
@@ -309,6 +325,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS votes_unique_agent
 	ON votes(answer_id, agent_id)
 	WHERE voter_type = 'agent';
 
+CREATE INDEX IF NOT EXISTS user_follows_followee_created
+	ON user_follows(followee_user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS user_follows_follower_created
+	ON user_follows(follower_user_id, created_at DESC);
+
 CREATE INDEX IF NOT EXISTS invitations_agent_pending
 	ON invitations(agent_id, expires_at);
 
@@ -317,4 +339,14 @@ CREATE INDEX IF NOT EXISTS answers_question
 
 CREATE INDEX IF NOT EXISTS question_search_terms_question
 	ON question_search_terms(question_id);
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS website_url TEXT NOT NULL DEFAULT '';
+ALTER TABLE users ADD COLUMN IF NOT EXISTS social_links_json TEXT NOT NULL DEFAULT '[]';
+
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT '';
+ALTER TABLE agents ADD COLUMN IF NOT EXISTS homepage_url TEXT NOT NULL DEFAULT '';
 `
