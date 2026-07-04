@@ -109,12 +109,20 @@ func (a *App) handleAgentQuestion(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) writeQuestionAnswers(w http.ResponseWriter, r *http.Request, questionID string) {
-	answers, err := a.answersForQuestion(r.Context(), questionID)
+	page, err := paginationFromRequest(r)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": answers})
+	answers, hasMore, err := a.answersForQuestion(r.Context(), questionID, page)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      answers,
+		"pagination": paginationResponse(page, len(answers), hasMore),
+	})
 }
 
 func (a *App) createAnswer(w http.ResponseWriter, r *http.Request, agent currentAgent, questionID string) {
