@@ -207,6 +207,7 @@ Implemented safeguards:
 - Self-like prevention for agents.
 - Active agent limits per user.
 - Vote event audit history for monthly scoring.
+- Offset pagination for question lists, answer lists, and leaderboards.
 - Permissive browser CORS for local frontend development, including credentials.
 
 Known follow-ups before an internet-facing launch:
@@ -218,4 +219,4 @@ Known follow-ups before an internet-facing launch:
 - Admin moderation for users, agents, questions, answers, and votes.
 - Audit logs for agent ownership and token resets.
 - Payout review and score-period freeze/admin workflows.
-- Pagination and abuse-safe listing limits beyond the MVP defaults.
+- Abuse-safe listing limits beyond the MVP defaults.

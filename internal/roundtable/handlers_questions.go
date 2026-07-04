@@ -255,20 +255,27 @@ func appendInvitationCandidates(ctx context.Context, tx *sql.Tx, agentIDs *[]str
 }
 
 func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	terms, searching := questionListSearchTerms(r)
 	if searching && len(terms) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"items": []map[string]any{}})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"items":      []map[string]any{},
+			"pagination": paginationResponse(page, 0, false),
+		})
 		return
 	}
 
 	var rows *sql.Rows
-	var err error
 	if searching {
-		args := make([]any, 0, len(terms)+1)
+		args := make([]any, 0, len(terms)+3)
 		for _, term := range terms {
 			args = append(args, term)
 		}
-		args = append(args, len(terms))
+		args = append(args, len(terms), page.Limit+1, page.Offset)
 		rows, err = a.db.QueryContext(r.Context(), `
 			SELECT q.id, q.title, q.body, q.tags_json, q.created_at, u.display_name,
 				(SELECT COUNT(*) FROM answers WHERE question_id = q.id) AS answer_count
@@ -282,7 +289,7 @@ func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
 				HAVING COUNT(DISTINCT term) = `+placeholder(len(terms)+1)+`
 			) matches ON matches.question_id = q.id
 			ORDER BY q.created_at DESC
-			LIMIT 100
+			LIMIT `+placeholder(len(terms)+2)+` OFFSET `+placeholder(len(terms)+3)+`
 		`, args...)
 	} else {
 		rows, err = a.db.QueryContext(r.Context(), `
@@ -291,8 +298,8 @@ func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
 		FROM questions q
 		JOIN users u ON u.id = q.author_user_id
 		ORDER BY q.created_at DESC
-		LIMIT 100
-	`)
+		LIMIT $1 OFFSET $2
+	`, page.Limit+1, page.Offset)
 	}
 	if err != nil {
 		writeError(w, err)
@@ -318,7 +325,15 @@ func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
 			"answer_count": answerCount,
 		})
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	if err := rows.Err(); err != nil {
+		writeError(w, err)
+		return
+	}
+	items, hasMore := trimPaginatedItems(items, page)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      items,
+		"pagination": paginationResponse(page, len(items), hasMore),
+	})
 }
 
 func questionListSearchTerms(r *http.Request) ([]string, bool) {
@@ -389,16 +404,22 @@ func (a *App) getQuestion(w http.ResponseWriter, r *http.Request, questionID str
 		"answer_count": answerCount,
 	}
 
-	answers, err := a.answersForQuestion(r.Context(), questionID)
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	answers, hasMore, err := a.answersForQuestion(r.Context(), questionID, page)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	question["answers"] = answers
+	question["answers_pagination"] = paginationResponse(page, len(answers), hasMore)
 	writeJSON(w, http.StatusOK, question)
 }
 
-func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[string]any, error) {
+func (a *App) answersForQuestion(ctx context.Context, questionID string, page paginationParams) ([]map[string]any, bool, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT ans.id, ans.body, ans.created_at, ag.id, ag.name, owner.display_name,
 			COALESCE(SUM(v.value), 0) AS like_count
@@ -409,9 +430,10 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[
 		WHERE ans.question_id = $1
 		GROUP BY ans.id, ans.body, ans.created_at, ag.id, ag.name, owner.display_name
 		ORDER BY like_count DESC, ans.created_at ASC
-	`, questionID)
+		LIMIT $2 OFFSET $3
+	`, questionID, page.Limit+1, page.Offset)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	defer rows.Close()
 
@@ -420,7 +442,7 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[
 		var answerID, body, createdAt, agentID, agentName, ownerName string
 		var likeCount int
 		if err := rows.Scan(&answerID, &body, &createdAt, &agentID, &agentName, &ownerName, &likeCount); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		answers = append(answers, map[string]any{
 			"id":         answerID,
@@ -434,7 +456,11 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[
 			"like_count": likeCount,
 		})
 	}
-	return answers, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	answers, hasMore := trimPaginatedItems(answers, page)
+	return answers, hasMore, nil
 }
 
 func (a *App) questionExists(ctx context.Context, questionID string) bool {

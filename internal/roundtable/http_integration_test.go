@@ -731,6 +731,16 @@ func TestMonthlyLeaderboardsScoreAgentAnswersCurationAndOwners(t *testing.T) {
 	if got := floatField(t, curatorAgentScore, "answer_score"); got != 0 {
 		t.Fatalf("curator agent answer_score = %f, want 0", got)
 	}
+	agentLeaderboardPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/leaderboards/agents?period=2026-07&limit=1", "", http.StatusOK)
+	if got := len(listField(t, agentLeaderboardPage, "items")); got != 1 {
+		t.Fatalf("agent leaderboard page count = %d, want 1", got)
+	}
+	assertPagination(t, agentLeaderboardPage, 1, 0, true, 1)
+	agentLeaderboardSecondPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/leaderboards/agents?period=2026-07&limit=1&offset=1", "", http.StatusOK)
+	if got := len(listField(t, agentLeaderboardSecondPage, "items")); got != 1 {
+		t.Fatalf("agent leaderboard second page count = %d, want 1", got)
+	}
+	assertPagination(t, agentLeaderboardSecondPage, 1, 1, false, 0)
 
 	userLeaderboard := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/leaderboards/users?period=2026-07", "", http.StatusOK)
 	answerOwnerScore := leaderboardUserScore(t, userLeaderboard, answerOwnerID)
@@ -741,6 +751,16 @@ func TestMonthlyLeaderboardsScoreAgentAnswersCurationAndOwners(t *testing.T) {
 	if got := floatField(t, curatorOwnerScore, "owned_agent_score"); got <= 0 {
 		t.Fatalf("curator owner owned_agent_score = %f, want positive", got)
 	}
+	userLeaderboardPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/leaderboards/users?period=2026-07&limit=1", "", http.StatusOK)
+	if got := len(listField(t, userLeaderboardPage, "items")); got != 1 {
+		t.Fatalf("user leaderboard page count = %d, want 1", got)
+	}
+	assertPagination(t, userLeaderboardPage, 1, 0, true, 1)
+	userLeaderboardSecondPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/leaderboards/users?period=2026-07&limit=1&offset=1", "", http.StatusOK)
+	if got := len(listField(t, userLeaderboardSecondPage, "items")); got != 1 {
+		t.Fatalf("user leaderboard second page count = %d, want 1", got)
+	}
+	assertPagination(t, userLeaderboardSecondPage, 1, 1, false, 0)
 
 	agentScore := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/"+answerAgentID+"/scores?period=2026-07", "", http.StatusOK)
 	if got := floatField(t, agentScore, "answer_score"); got <= 0 {
@@ -817,6 +837,146 @@ func TestQuestionSearchMatchesTitleAndBody(t *testing.T) {
 	if got := len(listField(t, noMatch, "items")); got != 0 {
 		t.Fatalf("no-match result count = %d, want 0", got)
 	}
+}
+
+func TestQuestionListPagination(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, userClient, server.URL, mailer, "pagination-owner@example.com", "Pagination Owner")
+	agentResp := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":        "Pagination Agent",
+		"description": "Browses paginated question lists.",
+		"is_public":   true,
+	}, http.StatusCreated)
+	agentToken := stringField(t, agentResp, "token")
+
+	first := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "First pagination question",
+		"body":  "This should appear on the second page.",
+	}, http.StatusCreated)
+	now = now.Add(time.Minute)
+	second := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Second pagination question",
+		"body":  "This should appear on the first page.",
+	}, http.StatusCreated)
+	now = now.Add(time.Minute)
+	third := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Third pagination question",
+		"body":  "This should appear first.",
+	}, http.StatusCreated)
+
+	firstPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?limit=2", "", http.StatusOK)
+	firstItems := listField(t, firstPage, "items")
+	if len(firstItems) != 2 {
+		t.Fatalf("first page question count = %d, want 2", len(firstItems))
+	}
+	if got := stringField(t, firstItems[0].(map[string]any), "id"); got != stringField(t, third, "id") {
+		t.Fatalf("first page first id = %q, want latest question", got)
+	}
+	if got := stringField(t, firstItems[1].(map[string]any), "id"); got != stringField(t, second, "id") {
+		t.Fatalf("first page second id = %q, want second question", got)
+	}
+	assertPagination(t, firstPage, 2, 0, true, 2)
+
+	agentFirstPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions?limit=2", agentToken, http.StatusOK)
+	if got := len(listField(t, agentFirstPage, "items")); got != 2 {
+		t.Fatalf("agent first page question count = %d, want 2", got)
+	}
+	assertPagination(t, agentFirstPage, 2, 0, true, 2)
+
+	secondPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?limit=2&offset=2", "", http.StatusOK)
+	secondItems := listField(t, secondPage, "items")
+	if len(secondItems) != 1 {
+		t.Fatalf("second page question count = %d, want 1", len(secondItems))
+	}
+	if got := stringField(t, secondItems[0].(map[string]any), "id"); got != stringField(t, first, "id") {
+		t.Fatalf("second page id = %q, want first question", got)
+	}
+	assertPagination(t, secondPage, 2, 2, false, 0)
+
+	invalid := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions?limit=101", "", http.StatusBadRequest)
+	if got := invalid["code"]; got != "invalid_input" {
+		t.Fatalf("invalid limit code = %#v, want invalid_input", got)
+	}
+}
+
+func TestAnswerPagination(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, userClient, server.URL, mailer, "answer-pagination-owner@example.com", "Answer Pagination Owner")
+	agentTokens := []string{}
+	for _, name := range []string{"Answer Pager One", "Answer Pager Two", "Answer Pager Three"} {
+		agent := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+			"name":        name,
+			"description": "Answers pagination test questions.",
+			"is_public":   true,
+		}, http.StatusCreated)
+		agentTokens = append(agentTokens, stringField(t, agent, "token"))
+	}
+
+	question := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should answers be paginated?",
+		"body":  "Return the first page by default and let clients request more.",
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+
+	for _, token := range agentTokens {
+		now = now.Add(time.Minute)
+		postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", token, map[string]any{
+			"body": "Paginated answer body.",
+		}, http.StatusCreated)
+	}
+
+	detail := getJSON(t, userClient, server.URL+"/api/v1/questions/"+questionID+"?limit=2", "", http.StatusOK)
+	answers := listField(t, detail, "answers")
+	if len(answers) != 2 {
+		t.Fatalf("detail answer count = %d, want 2", len(answers))
+	}
+	assertNestedPagination(t, detail, "answers_pagination", 2, 0, true, 2)
+
+	agentAnswers := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers?limit=2&offset=2", agentTokens[0], http.StatusOK)
+	answerItems := listField(t, agentAnswers, "items")
+	if len(answerItems) != 1 {
+		t.Fatalf("agent answer page count = %d, want 1", len(answerItems))
+	}
+	assertPagination(t, agentAnswers, 2, 2, false, 0)
 }
 
 func TestQuestionSearchBackfillsExistingQuestions(t *testing.T) {
@@ -1690,4 +1850,34 @@ func mapField(t *testing.T, values map[string]any, name string) map[string]any {
 		t.Fatalf("field %q = %#v, want map", name, values[name])
 	}
 	return value
+}
+
+func assertPagination(t *testing.T, values map[string]any, limit int, offset int, hasMore bool, nextOffset int) {
+	t.Helper()
+
+	assertNestedPagination(t, values, "pagination", limit, offset, hasMore, nextOffset)
+}
+
+func assertNestedPagination(t *testing.T, values map[string]any, name string, limit int, offset int, hasMore bool, nextOffset int) {
+	t.Helper()
+
+	pagination := mapField(t, values, name)
+	if got := intField(t, pagination, "limit"); got != limit {
+		t.Fatalf("%s.limit = %d, want %d", name, got, limit)
+	}
+	if got := intField(t, pagination, "offset"); got != offset {
+		t.Fatalf("%s.offset = %d, want %d", name, got, offset)
+	}
+	if got := boolField(t, pagination, "has_more"); got != hasMore {
+		t.Fatalf("%s.has_more = %t, want %t", name, got, hasMore)
+	}
+	if hasMore {
+		if got := intField(t, pagination, "next_offset"); got != nextOffset {
+			t.Fatalf("%s.next_offset = %d, want %d", name, got, nextOffset)
+		}
+		return
+	}
+	if got := pagination["next_offset"]; got != nil {
+		t.Fatalf("%s.next_offset = %#v, want nil", name, got)
+	}
 }

@@ -594,6 +594,11 @@ func (a *App) replaceMonthlyScores(ctx context.Context, period monthlyScorePerio
 }
 
 func (a *App) writeAgentLeaderboard(w http.ResponseWriter, r *http.Request, period string) {
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT s.agent_id, ag.name, s.owner_user_id, owner.display_name,
 			s.answer_score, s.curation_score, s.reliability_score, s.penalty_score,
@@ -603,8 +608,8 @@ func (a *App) writeAgentLeaderboard(w http.ResponseWriter, r *http.Request, peri
 		JOIN users owner ON owner.id = s.owner_user_id
 		WHERE s.period = $1
 		ORDER BY s.rank ASC
-		LIMIT 100
-	`, period)
+		LIMIT $2 OFFSET $3
+	`, period, page.Limit+1, page.Offset)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -620,18 +625,25 @@ func (a *App) writeAgentLeaderboard(w http.ResponseWriter, r *http.Request, peri
 		}
 		items = append(items, item)
 	}
+	items, hasMore := trimPaginatedItems(items, page)
 	if err := rows.Err(); err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"period": period,
-		"status": "open",
-		"items":  items,
+		"period":     period,
+		"status":     "open",
+		"items":      items,
+		"pagination": paginationResponse(page, len(items), hasMore),
 	})
 }
 
 func (a *App) writeUserLeaderboard(w http.ResponseWriter, r *http.Request, period string) {
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT s.user_id, u.display_name, s.owned_agent_score, s.operator_bonus,
 			s.penalty_score, s.total_score, s.rank, s.details_json
@@ -639,8 +651,8 @@ func (a *App) writeUserLeaderboard(w http.ResponseWriter, r *http.Request, perio
 		JOIN users u ON u.id = s.user_id
 		WHERE s.period = $1
 		ORDER BY s.rank ASC
-		LIMIT 100
-	`, period)
+		LIMIT $2 OFFSET $3
+	`, period, page.Limit+1, page.Offset)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -656,14 +668,16 @@ func (a *App) writeUserLeaderboard(w http.ResponseWriter, r *http.Request, perio
 		}
 		items = append(items, item)
 	}
+	items, hasMore := trimPaginatedItems(items, page)
 	if err := rows.Err(); err != nil {
 		writeError(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"period": period,
-		"status": "open",
-		"items":  items,
+		"period":     period,
+		"status":     "open",
+		"items":      items,
+		"pagination": paginationResponse(page, len(items), hasMore),
 	})
 }
 

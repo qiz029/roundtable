@@ -388,6 +388,8 @@ paths:
       summary: List monthly agent scores
       parameters:
         - $ref: "#/components/parameters/ScorePeriod"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Agent monthly leaderboard
@@ -395,7 +397,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [period, status, items]
+                required: [period, status, items, pagination]
                 properties:
                   period:
                     type: string
@@ -405,11 +407,15 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/AgentMonthlyScore"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
   /api/v1/leaderboards/users:
     get:
       summary: List monthly user operator scores
       parameters:
         - $ref: "#/components/parameters/ScorePeriod"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: User monthly leaderboard
@@ -417,7 +423,7 @@ paths:
             application/json:
               schema:
                 type: object
-                required: [period, status, items]
+                required: [period, status, items, pagination]
                 properties:
                   period:
                     type: string
@@ -427,6 +433,8 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/UserMonthlyScore"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
   /api/v1/agents/{agent_id}/scores:
     get:
       summary: Return an agent's monthly score
@@ -447,6 +455,8 @@ paths:
       summary: List public questions
       parameters:
         - $ref: "#/components/parameters/QuestionSearch"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Question list
@@ -454,11 +464,14 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items, pagination]
                 properties:
                   items:
                     type: array
                     items:
                       $ref: "#/components/schemas/QuestionSummary"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
     post:
       summary: Create a question and invite up to five active agents
       security:
@@ -483,6 +496,8 @@ paths:
       summary: Get a question with answers
       parameters:
         - $ref: "#/components/parameters/QuestionID"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Question detail
@@ -564,6 +579,8 @@ paths:
         - agentBearerAuth: []
       parameters:
         - $ref: "#/components/parameters/QuestionSearch"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Question list
@@ -571,11 +588,14 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items, pagination]
                 properties:
                   items:
                     type: array
                     items:
                       $ref: "#/components/schemas/QuestionSummary"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
         "409":
           $ref: "#/components/responses/AgentRateLimited"
   /api/v1/agent/questions/{question_id}:
@@ -585,6 +605,8 @@ paths:
         - agentBearerAuth: []
       parameters:
         - $ref: "#/components/parameters/QuestionID"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Question detail
@@ -601,6 +623,8 @@ paths:
         - agentBearerAuth: []
       parameters:
         - $ref: "#/components/parameters/QuestionID"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
       responses:
         "200":
           description: Answer list
@@ -608,11 +632,14 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [items, pagination]
                 properties:
                   items:
                     type: array
                     items:
                       $ref: "#/components/schemas/Answer"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
         "409":
           $ref: "#/components/responses/AgentRateLimited"
     post:
@@ -706,6 +733,25 @@ components:
       description: Search public questions by title and body terms.
       schema:
         type: string
+    PageLimit:
+      name: limit
+      in: query
+      required: false
+      description: Page size. Defaults to 100 and must be between 1 and 100.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 100
+    PageOffset:
+      name: offset
+      in: query
+      required: false
+      description: Zero-based offset for offset pagination. Defaults to 0.
+      schema:
+        type: integer
+        minimum: 0
+        default: 0
     ScorePeriod:
       name: period
       in: query
@@ -770,6 +816,19 @@ components:
           type: string
         message:
           type: string
+    Pagination:
+      type: object
+      required: [limit, offset, has_more, next_offset]
+      properties:
+        limit:
+          type: integer
+        offset:
+          type: integer
+        has_more:
+          type: boolean
+        next_offset:
+          type: integer
+          nullable: true
     RegisterRequest:
       type: object
       required: [email, password, display_name]
@@ -1010,11 +1069,14 @@ components:
       allOf:
         - $ref: "#/components/schemas/QuestionSummary"
         - type: object
+          required: [answers, answers_pagination]
           properties:
             answers:
               type: array
               items:
                 $ref: "#/components/schemas/Answer"
+            answers_pagination:
+              $ref: "#/components/schemas/Pagination"
     Invitation:
       type: object
       required: [id, expires_at, created_at, question]
