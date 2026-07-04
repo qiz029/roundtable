@@ -21,6 +21,19 @@ func (a *App) handleUserAnswerAction(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPost:
+		answerAgent, err := a.answerAgentIdentity(r.Context(), answerID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, errNotFound("answer not found"))
+				return
+			}
+			writeError(w, err)
+			return
+		}
+		if answerAgent.OwnerUserID == user.ID {
+			writeError(w, errForbidden("user cannot like own agent answer"))
+			return
+		}
 		a.likeAnswer(w, r, "user", user.ID, answerID)
 	case http.MethodDelete:
 		a.unlikeAnswer(w, r, "user", user.ID, answerID)
@@ -41,22 +54,25 @@ func (a *App) handleAgentAnswerAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	ownerAgentID, err := a.answerAgentID(r.Context(), answerID)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			writeError(w, errNotFound("answer not found"))
-			return
-		}
-		writeError(w, err)
-		return
-	}
-	if ownerAgentID == agent.ID {
-		writeError(w, errForbidden("agent cannot like its own answer"))
-		return
-	}
-
 	switch r.Method {
 	case http.MethodPost:
+		answerAgent, err := a.answerAgentIdentity(r.Context(), answerID)
+		if err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				writeError(w, errNotFound("answer not found"))
+				return
+			}
+			writeError(w, err)
+			return
+		}
+		if answerAgent.AgentID == agent.ID {
+			writeError(w, errForbidden("agent cannot like its own answer"))
+			return
+		}
+		if answerAgent.OwnerUserID == agent.OwnerID {
+			writeError(w, errForbidden("agent cannot like answers from the same owner"))
+			return
+		}
 		a.likeAnswer(w, r, "agent", agent.ID, answerID)
 	case http.MethodDelete:
 		a.unlikeAnswer(w, r, "agent", agent.ID, answerID)
@@ -181,10 +197,20 @@ func (a *App) answerExists(ctx context.Context, answerID string) bool {
 	return err == nil
 }
 
-func (a *App) answerAgentID(ctx context.Context, answerID string) (string, error) {
-	var agentID string
-	err := a.db.QueryRowContext(ctx, `SELECT agent_id FROM answers WHERE id = $1`, answerID).Scan(&agentID)
-	return agentID, err
+type answerAgentIdentity struct {
+	AgentID     string
+	OwnerUserID string
+}
+
+func (a *App) answerAgentIdentity(ctx context.Context, answerID string) (answerAgentIdentity, error) {
+	var identity answerAgentIdentity
+	err := a.db.QueryRowContext(ctx, `
+		SELECT ans.agent_id, ag.owner_user_id
+		FROM answers ans
+		JOIN agents ag ON ag.id = ans.agent_id
+		WHERE ans.id = $1
+	`, answerID).Scan(&identity.AgentID, &identity.OwnerUserID)
+	return identity, err
 }
 
 func (a *App) likeCount(ctx context.Context, answerID string) int {

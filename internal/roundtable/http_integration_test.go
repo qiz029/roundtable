@@ -148,8 +148,32 @@ func TestUserAgentQuestionRoundTrip(t *testing.T) {
 		t.Fatalf("initial like_count = %d, want 0", got)
 	}
 
-	postJSON(t, userClient, server.URL+"/api/v1/answers/"+answerID+"/like", "", nil, http.StatusOK)
-	postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+answerID+"/like", secondAgentToken, nil, http.StatusOK)
+	ownerLike := postJSON(t, userClient, server.URL+"/api/v1/answers/"+answerID+"/like", "", nil, http.StatusForbidden)
+	if got := ownerLike["code"]; got != "forbidden" {
+		t.Fatalf("owner like code = %#v, want forbidden", got)
+	}
+	sameOwnerAgentLike := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+answerID+"/like", secondAgentToken, nil, http.StatusForbidden)
+	if got := sameOwnerAgentLike["code"]; got != "forbidden" {
+		t.Fatalf("same owner agent like code = %#v, want forbidden", got)
+	}
+
+	detail = getJSON(t, userClient, server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK)
+	answer = listField(t, detail, "answers")[0].(map[string]any)
+	if got := intField(t, answer, "like_count"); got != 0 {
+		t.Fatalf("like_count after forbidden own-network likes = %d, want 0", got)
+	}
+
+	voterClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, voterClient, server.URL, mailer, "voter@example.com", "Voter")
+	voterAgentResp := postJSON(t, voterClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":        "External Reviewer",
+		"description": "Reviews answers from another owner.",
+		"is_public":   true,
+	}, http.StatusCreated)
+	voterAgentToken := stringField(t, voterAgentResp, "token")
+
+	postJSON(t, voterClient, server.URL+"/api/v1/answers/"+answerID+"/like", "", nil, http.StatusOK)
+	postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+answerID+"/like", voterAgentToken, nil, http.StatusOK)
 
 	detail = getJSON(t, userClient, server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK)
 	answer = listField(t, detail, "answers")[0].(map[string]any)
@@ -728,9 +752,15 @@ func TestMonthlyLeaderboardsScoreAgentAnswersCurationAndOwners(t *testing.T) {
 	if got := floatField(t, answerAgentScore, "answer_score"); got <= 0 {
 		t.Fatalf("answer agent answer_score = %f, want positive", got)
 	}
+	if got := floatField(t, answerAgentScore, "penalty_score"); got != 0 {
+		t.Fatalf("answer agent penalty_score = %f, want 0", got)
+	}
 	curatorAgentScore := leaderboardAgentScore(t, agentLeaderboard, curatorAgentID)
 	if got := floatField(t, curatorAgentScore, "curation_score"); got <= 0 {
 		t.Fatalf("curator agent curation_score = %f, want positive", got)
+	}
+	if got := floatField(t, curatorAgentScore, "penalty_score"); got != 0 {
+		t.Fatalf("curator agent penalty_score = %f, want 0", got)
 	}
 	if got := floatField(t, curatorAgentScore, "answer_score"); got != 0 {
 		t.Fatalf("curator agent answer_score = %f, want 0", got)
@@ -751,9 +781,15 @@ func TestMonthlyLeaderboardsScoreAgentAnswersCurationAndOwners(t *testing.T) {
 	if got := floatField(t, answerOwnerScore, "owned_agent_score"); got <= 0 {
 		t.Fatalf("answer owner owned_agent_score = %f, want positive", got)
 	}
+	if got := floatField(t, answerOwnerScore, "penalty_score"); got != 0 {
+		t.Fatalf("answer owner penalty_score = %f, want 0", got)
+	}
 	curatorOwnerScore := leaderboardUserScore(t, userLeaderboard, curatorUserID)
 	if got := floatField(t, curatorOwnerScore, "owned_agent_score"); got <= 0 {
 		t.Fatalf("curator owner owned_agent_score = %f, want positive", got)
+	}
+	if got := floatField(t, curatorOwnerScore, "penalty_score"); got != 0 {
+		t.Fatalf("curator owner penalty_score = %f, want 0", got)
 	}
 	userLeaderboardPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/leaderboards/users?period=2026-07&limit=1", "", http.StatusOK)
 	if got := len(listField(t, userLeaderboardPage, "items")); got != 1 {

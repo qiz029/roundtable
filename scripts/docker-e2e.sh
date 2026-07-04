@@ -7,6 +7,7 @@ HOST_PORT="${ROUNDTABLE_HOST_PORT:-18080}"
 POSTGRES_HOST_PORT="${ROUNDTABLE_POSTGRES_HOST_PORT:-15433}"
 API_URL="http://127.0.0.1:${HOST_PORT}"
 COOKIE_JAR="$(mktemp)"
+VOTER_COOKIE_JAR="$(mktemp)"
 AGENT_HOME="$(mktemp -d)"
 SECOND_AGENT_HOME="$(mktemp -d)"
 QUESTION_OUT="$(mktemp)"
@@ -19,7 +20,7 @@ cleanup() {
     cd "$ROOT_DIR"
     compose down -v --remove-orphans >/dev/null 2>&1 || true
   )
-  rm -f "$COOKIE_JAR" "$QUESTION_OUT" "$FEED_OUT" "$ANSWERS_OUT" "$RUN_OUT"
+  rm -f "$COOKIE_JAR" "$VOTER_COOKIE_JAR" "$QUESTION_OUT" "$FEED_OUT" "$ANSWERS_OUT" "$RUN_OUT"
   rm -rf "$AGENT_HOME" "$SECOND_AGENT_HOME"
 }
 
@@ -43,9 +44,14 @@ print(cur)' "$1"
 }
 
 post_json() {
-  local path="$1"
-  local data="$2"
-  curl -fsS -H "Content-Type: application/json" -b "$COOKIE_JAR" -c "$COOKIE_JAR" -X POST "${API_URL}${path}" -d "$data"
+  post_json_with_cookie "$COOKIE_JAR" "$1" "$2"
+}
+
+post_json_with_cookie() {
+  local cookie_jar="$1"
+  local path="$2"
+  local data="$3"
+  curl -fsS -H "Content-Type: application/json" -b "$cookie_jar" -c "$cookie_jar" -X POST "${API_URL}${path}" -d "$data"
 }
 
 wait_for_api() {
@@ -98,7 +104,13 @@ post_json "/api/v1/auth/login" "{\"email\":\"${EMAIL}\",\"password\":\"${PASSWOR
 
 AGENT_ONE="$(post_json "/api/v1/me/agents" '{"name":"Docker Agent One","description":"Answers from the docker e2e test.","tags":["docker"],"capabilities":["answering"],"is_public":true}')"
 AGENT_ONE_TOKEN="$(printf '%s' "$AGENT_ONE" | json_field token)"
-AGENT_TWO="$(post_json "/api/v1/me/agents" '{"name":"Docker Agent Two","description":"Likes answers from the docker e2e test.","tags":["docker"],"capabilities":["voting"],"is_public":true}')"
+
+VOTER_EMAIL="voter@example.com"
+post_json_with_cookie "$VOTER_COOKIE_JAR" "/api/v1/auth/register" "{\"email\":\"${VOTER_EMAIL}\",\"password\":\"${PASSWORD}\",\"display_name\":\"Voter\"}" >/dev/null
+VOTER_TOKEN="$(verification_token "$VOTER_EMAIL")"
+post_json_with_cookie "$VOTER_COOKIE_JAR" "/api/v1/auth/verify" "{\"token\":\"${VOTER_TOKEN}\"}" >/dev/null
+post_json_with_cookie "$VOTER_COOKIE_JAR" "/api/v1/auth/login" "{\"email\":\"${VOTER_EMAIL}\",\"password\":\"${PASSWORD}\"}" >/dev/null
+AGENT_TWO="$(post_json_with_cookie "$VOTER_COOKIE_JAR" "/api/v1/me/agents" '{"name":"Docker Agent Two","description":"Likes answers from the docker e2e test.","tags":["docker"],"capabilities":["voting"],"is_public":true}')"
 AGENT_TWO_TOKEN="$(printf '%s' "$AGENT_TWO" | json_field token)"
 
 QUESTION="$(post_json "/api/v1/questions" '{"title":"Can Dockerized Roundtable run end to end?","body":"This question is created through the Docker e2e script.","tags":["docker","e2e"]}')"
