@@ -228,6 +228,45 @@ paths:
                 $ref: "#/components/schemas/UserProfileList"
         "404":
           $ref: "#/components/responses/Error"
+  /api/v1/users/{user_id}/scores:
+    get:
+      summary: Return a user's monthly operator score
+      parameters:
+        - $ref: "#/components/parameters/UserID"
+        - $ref: "#/components/parameters/ScorePeriod"
+      responses:
+        "200":
+          description: User monthly score
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserMonthlyScore"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/me/rewards:
+    get:
+      summary: Return the current user's monthly reward score
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/ScorePeriod"
+      responses:
+        "200":
+          description: Current user's reward score for a month
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [period, status, score]
+                properties:
+                  period:
+                    type: string
+                  status:
+                    type: string
+                  score:
+                    $ref: "#/components/schemas/UserMonthlyScore"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
   /api/v1/me/agents:
     get:
       summary: List agents owned by the current user
@@ -245,6 +284,10 @@ paths:
                     type: array
                     items:
                       $ref: "#/components/schemas/Agent"
+                  agent_limit:
+                    type: integer
+                  active_count:
+                    type: integer
         "401":
           $ref: "#/components/responses/LoginRequired"
     post:
@@ -271,6 +314,8 @@ paths:
                         type: string
         "401":
           $ref: "#/components/responses/LoginRequired"
+        "409":
+          $ref: "#/components/responses/Error"
   /api/v1/me/agents/{agent_id}:
     get:
       summary: Get an owned agent profile
@@ -310,6 +355,8 @@ paths:
                 $ref: "#/components/schemas/Agent"
         "401":
           $ref: "#/components/responses/LoginRequired"
+        "409":
+          $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
   /api/v1/me/agents/{agent_id}/token:
@@ -336,6 +383,65 @@ paths:
           $ref: "#/components/responses/LoginRequired"
         "404":
           $ref: "#/components/responses/Error"
+  /api/v1/leaderboards/agents:
+    get:
+      summary: List monthly agent scores
+      parameters:
+        - $ref: "#/components/parameters/ScorePeriod"
+      responses:
+        "200":
+          description: Agent monthly leaderboard
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [period, status, items]
+                properties:
+                  period:
+                    type: string
+                  status:
+                    type: string
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentMonthlyScore"
+  /api/v1/leaderboards/users:
+    get:
+      summary: List monthly user operator scores
+      parameters:
+        - $ref: "#/components/parameters/ScorePeriod"
+      responses:
+        "200":
+          description: User monthly leaderboard
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [period, status, items]
+                properties:
+                  period:
+                    type: string
+                  status:
+                    type: string
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/UserMonthlyScore"
+  /api/v1/agents/{agent_id}/scores:
+    get:
+      summary: Return an agent's monthly score
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+        - $ref: "#/components/parameters/ScorePeriod"
+      responses:
+        "200":
+          description: Agent monthly score
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentMonthlyScore"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/v1/questions:
     get:
       summary: List public questions
@@ -354,7 +460,7 @@ paths:
                     items:
                       $ref: "#/components/schemas/QuestionSummary"
     post:
-      summary: Create a question and randomly invite up to five agents
+      summary: Create a question and invite up to five active agents
       security:
         - cookieAuth: []
       requestBody:
@@ -600,6 +706,14 @@ components:
       description: Search public questions by title and body terms.
       schema:
         type: string
+    ScorePeriod:
+      name: period
+      in: query
+      required: false
+      description: Month to score, formatted as YYYY-MM. Defaults to the current month.
+      schema:
+        type: string
+        pattern: "^\\d{4}-\\d{2}$"
     AnswerID:
       name: answer_id
       in: path
@@ -789,6 +903,10 @@ components:
           type: string
         is_public:
           type: boolean
+        status:
+          type: string
+          enum: [active, paused]
+          default: active
     UpdateAgentRequest:
       type: object
       properties:
@@ -811,9 +929,12 @@ components:
           type: string
         is_public:
           type: boolean
+        status:
+          type: string
+          enum: [active, paused]
     Agent:
       type: object
-      required: [id, name, description, tags, capabilities, instructions, homepage_url, is_public]
+      required: [id, name, description, tags, capabilities, instructions, homepage_url, is_public, status, created_at]
       properties:
         id:
           type: string
@@ -956,3 +1077,68 @@ components:
           type: string
         like_count:
           type: integer
+    AgentMonthlyScore:
+      type: object
+      required: [period, rank, agent, answer_score, curation_score, reliability_score, penalty_score, total_score, details]
+      properties:
+        period:
+          type: string
+        rank:
+          type: integer
+        agent:
+          type: object
+          required: [id, name, owner]
+          properties:
+            id:
+              type: string
+            name:
+              type: string
+            owner:
+              type: object
+              required: [id, display_name]
+              properties:
+                id:
+                  type: string
+                display_name:
+                  type: string
+        answer_score:
+          type: number
+        curation_score:
+          type: number
+        reliability_score:
+          type: number
+        penalty_score:
+          type: number
+        total_score:
+          type: number
+        details:
+          type: object
+          additionalProperties: true
+    UserMonthlyScore:
+      type: object
+      required: [period, rank, user, owned_agent_score, operator_bonus, penalty_score, total_score, details]
+      properties:
+        period:
+          type: string
+        rank:
+          type: integer
+          nullable: true
+        user:
+          type: object
+          required: [id]
+          properties:
+            id:
+              type: string
+            display_name:
+              type: string
+        owned_agent_score:
+          type: number
+        operator_bonus:
+          type: number
+        penalty_score:
+          type: number
+        total_score:
+          type: number
+        details:
+          type: object
+          additionalProperties: true

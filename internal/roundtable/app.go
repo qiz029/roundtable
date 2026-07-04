@@ -77,8 +77,12 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/auth/logout", a.handleLogout)
 	mux.HandleFunc("/api/v1/auth/me", a.handleMe)
 	mux.HandleFunc("/api/v1/me/profile", a.handleMyProfile)
+	mux.HandleFunc("/api/v1/me/rewards", a.handleMyRewards)
 	mux.HandleFunc("/api/v1/me/agents", a.handleMyAgents)
 	mux.HandleFunc("/api/v1/me/agents/", a.handleMyAgent)
+	mux.HandleFunc("/api/v1/leaderboards/agents", a.handleAgentLeaderboard)
+	mux.HandleFunc("/api/v1/leaderboards/users", a.handleUserLeaderboard)
+	mux.HandleFunc("/api/v1/agents/", a.handlePublicAgentScore)
 	mux.HandleFunc("/api/v1/users/", a.handleUserProfile)
 	mux.HandleFunc("/api/v1/questions", a.handleQuestions)
 	mux.HandleFunc("/api/v1/questions/", a.handleQuestion)
@@ -137,6 +141,14 @@ func errNotFound(message string) apiError {
 
 func errConflict(message string) apiError {
 	return apiError{Status: http.StatusConflict, Code: "conflict", Message: message}
+}
+
+func errAgentLimitExceeded(limit int) apiError {
+	return apiError{
+		Status:  http.StatusConflict,
+		Code:    "agent_limit_exceeded",
+		Message: fmt.Sprintf("active agent limit exceeded: max %d active agents", limit),
+	}
 }
 
 func errAgentRateLimited(limit int) apiError {
@@ -236,10 +248,11 @@ CREATE TABLE IF NOT EXISTS users (
 	social_links_json TEXT NOT NULL DEFAULT '[]',
 	password_hash TEXT NOT NULL,
 	email_verified_at TEXT,
-	verification_token_hash TEXT,
-	status TEXT NOT NULL DEFAULT 'active',
-	created_at TEXT NOT NULL
-);
+		verification_token_hash TEXT,
+		status TEXT NOT NULL DEFAULT 'active',
+		agent_limit INTEGER NOT NULL DEFAULT 3,
+		created_at TEXT NOT NULL
+	);
 
 CREATE TABLE IF NOT EXISTS sessions (
 	id TEXT PRIMARY KEY,
@@ -307,23 +320,73 @@ CREATE TABLE IF NOT EXISTS answers (
 	UNIQUE(question_id, agent_id)
 );
 
-CREATE TABLE IF NOT EXISTS votes (
-	id TEXT PRIMARY KEY,
-	answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
-	voter_type TEXT NOT NULL,
+	CREATE TABLE IF NOT EXISTS votes (
+		id TEXT PRIMARY KEY,
+		answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
+		voter_type TEXT NOT NULL,
 	user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
 	agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-	value INTEGER NOT NULL DEFAULT 1,
-	created_at TEXT NOT NULL
-);
+		value INTEGER NOT NULL DEFAULT 1,
+		revoked_at TEXT,
+		created_at TEXT NOT NULL
+	);
 
-CREATE UNIQUE INDEX IF NOT EXISTS votes_unique_user
-	ON votes(answer_id, user_id)
-	WHERE voter_type = 'user';
+	ALTER TABLE votes ADD COLUMN IF NOT EXISTS revoked_at TEXT;
 
-CREATE UNIQUE INDEX IF NOT EXISTS votes_unique_agent
-	ON votes(answer_id, agent_id)
-	WHERE voter_type = 'agent';
+	DROP INDEX IF EXISTS votes_unique_user;
+	DROP INDEX IF EXISTS votes_unique_agent;
+
+	CREATE UNIQUE INDEX IF NOT EXISTS votes_unique_active_user
+		ON votes(answer_id, user_id)
+		WHERE voter_type = 'user' AND revoked_at IS NULL;
+
+	CREATE UNIQUE INDEX IF NOT EXISTS votes_unique_active_agent
+		ON votes(answer_id, agent_id)
+		WHERE voter_type = 'agent' AND revoked_at IS NULL;
+
+	CREATE TABLE IF NOT EXISTS vote_events (
+		id TEXT PRIMARY KEY,
+		answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
+		voter_type TEXT NOT NULL,
+		user_id TEXT REFERENCES users(id) ON DELETE CASCADE,
+		agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+		action TEXT NOT NULL,
+		created_at TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS score_periods (
+		period TEXT PRIMARY KEY,
+		status TEXT NOT NULL,
+		starts_at TEXT NOT NULL,
+		ends_at TEXT NOT NULL,
+		frozen_at TEXT
+	);
+
+	CREATE TABLE IF NOT EXISTS agent_monthly_scores (
+		period TEXT NOT NULL REFERENCES score_periods(period) ON DELETE CASCADE,
+		agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+		owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		answer_score REAL NOT NULL DEFAULT 0,
+		curation_score REAL NOT NULL DEFAULT 0,
+		reliability_score REAL NOT NULL DEFAULT 0,
+		penalty_score REAL NOT NULL DEFAULT 0,
+		total_score REAL NOT NULL DEFAULT 0,
+		rank INTEGER,
+		details_json TEXT NOT NULL DEFAULT '{}',
+		PRIMARY KEY(period, agent_id)
+	);
+
+	CREATE TABLE IF NOT EXISTS user_monthly_scores (
+		period TEXT NOT NULL REFERENCES score_periods(period) ON DELETE CASCADE,
+		user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+		owned_agent_score REAL NOT NULL DEFAULT 0,
+		operator_bonus REAL NOT NULL DEFAULT 0,
+		penalty_score REAL NOT NULL DEFAULT 0,
+		total_score REAL NOT NULL DEFAULT 0,
+		rank INTEGER,
+		details_json TEXT NOT NULL DEFAULT '{}',
+		PRIMARY KEY(period, user_id)
+	);
 
 CREATE INDEX IF NOT EXISTS user_follows_followee_created
 	ON user_follows(followee_user_id, created_at DESC);
@@ -334,19 +397,34 @@ CREATE INDEX IF NOT EXISTS user_follows_follower_created
 CREATE INDEX IF NOT EXISTS invitations_agent_pending
 	ON invitations(agent_id, expires_at);
 
-CREATE INDEX IF NOT EXISTS answers_question
-	ON answers(question_id);
+	CREATE INDEX IF NOT EXISTS answers_question
+		ON answers(question_id);
 
-CREATE INDEX IF NOT EXISTS question_search_terms_question
-	ON question_search_terms(question_id);
+	CREATE INDEX IF NOT EXISTS votes_answer_active
+		ON votes(answer_id)
+		WHERE revoked_at IS NULL;
 
-ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT '';
-ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
+	CREATE INDEX IF NOT EXISTS vote_events_answer_created
+		ON vote_events(answer_id, created_at);
+
+	CREATE INDEX IF NOT EXISTS agent_monthly_scores_period_rank
+		ON agent_monthly_scores(period, rank);
+
+	CREATE INDEX IF NOT EXISTS user_monthly_scores_period_rank
+		ON user_monthly_scores(period, rank);
+
+	CREATE INDEX IF NOT EXISTS question_search_terms_question
+		ON question_search_terms(question_id);
+
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
 ALTER TABLE users ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
-ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
-ALTER TABLE users ADD COLUMN IF NOT EXISTS website_url TEXT NOT NULL DEFAULT '';
-ALTER TABLE users ADD COLUMN IF NOT EXISTS social_links_json TEXT NOT NULL DEFAULT '[]';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS website_url TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS social_links_json TEXT NOT NULL DEFAULT '[]';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_limit INTEGER NOT NULL DEFAULT 3;
 
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT '';
-ALTER TABLE agents ADD COLUMN IF NOT EXISTS homepage_url TEXT NOT NULL DEFAULT '';
-`
+	ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT '';
+	ALTER TABLE agents ADD COLUMN IF NOT EXISTS homepage_url TEXT NOT NULL DEFAULT '';
+	ALTER TABLE votes ADD COLUMN IF NOT EXISTS revoked_at TEXT;
+	`

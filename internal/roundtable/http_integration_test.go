@@ -249,8 +249,14 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	defer app.Close()
 
 	assertSelectable(t, db, `SELECT full_name, bio, background, avatar_url, website_url, social_links_json FROM users LIMIT 0`)
+	assertSelectable(t, db, `SELECT agent_limit FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT instructions, homepage_url FROM agents LIMIT 0`)
 	assertSelectable(t, db, `SELECT follower_user_id, followee_user_id, created_at FROM user_follows LIMIT 0`)
+	assertSelectable(t, db, `SELECT revoked_at FROM votes LIMIT 0`)
+	assertSelectable(t, db, `SELECT answer_id, voter_type, action, created_at FROM vote_events LIMIT 0`)
+	assertSelectable(t, db, `SELECT period, status, starts_at, ends_at, frozen_at FROM score_periods LIMIT 0`)
+	assertSelectable(t, db, `SELECT period, agent_id, owner_user_id, total_score, rank, details_json FROM agent_monthly_scores LIMIT 0`)
+	assertSelectable(t, db, `SELECT period, user_id, total_score, rank, details_json FROM user_monthly_scores LIMIT 0`)
 }
 
 func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
@@ -549,6 +555,208 @@ func TestOwnedAgentProfileGetAndPatch(t *testing.T) {
 	}, http.StatusNotFound)
 }
 
+func TestOwnedAgentActiveLimitAndPausedAgents(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerAndVerifyUser(t, userClient, server.URL, mailer, "agent-limit-owner@example.com")
+	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "agent-limit-owner@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+
+	created := make([]map[string]any, 0, 4)
+	for i := 1; i <= 3; i++ {
+		created = append(created, postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+			"name":         "Limit Agent " + string(rune('0'+i)),
+			"description":  "Participates while active.",
+			"capabilities": []string{"answering"},
+			"is_public":    true,
+		}, http.StatusCreated))
+	}
+
+	limitResp := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Fourth Agent",
+		"description":  "Should require freeing an active slot first.",
+		"capabilities": []string{"answering"},
+		"is_public":    true,
+	}, http.StatusConflict)
+	if got := limitResp["code"]; got != "agent_limit_exceeded" {
+		t.Fatalf("limit error code = %#v, want agent_limit_exceeded", got)
+	}
+
+	firstAgentID := stringField(t, created[0], "id")
+	firstAgentToken := stringField(t, created[0], "token")
+	paused := patchJSON(t, userClient, server.URL+"/api/v1/me/agents/"+firstAgentID, "", map[string]any{
+		"status": "paused",
+	}, http.StatusOK)
+	if got := stringField(t, paused, "status"); got != "paused" {
+		t.Fatalf("paused status = %q, want paused", got)
+	}
+
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/invitations", firstAgentToken, http.StatusUnauthorized)
+
+	fourth := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Fourth Agent",
+		"description":  "Uses the freed active slot.",
+		"capabilities": []string{"answering"},
+		"is_public":    true,
+	}, http.StatusCreated)
+	created = append(created, fourth)
+
+	list := getJSON(t, userClient, server.URL+"/api/v1/me/agents", "", http.StatusOK)
+	if got := intField(t, list, "agent_limit"); got != 3 {
+		t.Fatalf("agent_limit = %d, want 3", got)
+	}
+	if got := intField(t, list, "active_count"); got != 3 {
+		t.Fatalf("active_count = %d, want 3", got)
+	}
+
+	questionResp := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Which agents should receive invitations?",
+		"body":  "Paused agents should not receive work and should not count toward the active agent limit.",
+	}, http.StatusCreated)
+	if got := intField(t, questionResp, "invitation_count"); got != 3 {
+		t.Fatalf("invitation_count = %d, want 3 active agents", got)
+	}
+
+	resume := patchJSON(t, userClient, server.URL+"/api/v1/me/agents/"+firstAgentID, "", map[string]any{
+		"status": "active",
+	}, http.StatusConflict)
+	if got := resume["code"]; got != "agent_limit_exceeded" {
+		t.Fatalf("resume limit error code = %#v, want agent_limit_exceeded", got)
+	}
+}
+
+func TestMonthlyLeaderboardsScoreAgentAnswersCurationAndOwners(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	answerOwnerClient := newHTTPClient(t)
+	answerOwnerID := registerVerifyAndLoginUser(t, answerOwnerClient, server.URL, mailer, "answer-owner@example.com", "Answer Owner")
+	answerAgent := postJSON(t, answerOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Answer Agent",
+		"description":  "Provides useful answers.",
+		"capabilities": []string{"answering"},
+		"is_public":    true,
+	}, http.StatusCreated)
+	answerAgentID := stringField(t, answerAgent, "id")
+	answerAgentToken := stringField(t, answerAgent, "token")
+
+	curatorClient := newHTTPClient(t)
+	curatorUserID := registerVerifyAndLoginUser(t, curatorClient, server.URL, mailer, "curator-owner@example.com", "Curator Owner")
+	curatorAgent := postJSON(t, curatorClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Curator Agent",
+		"description":  "Finds good answers early.",
+		"capabilities": []string{"curation"},
+		"is_public":    true,
+	}, http.StatusCreated)
+	curatorAgentID := stringField(t, curatorAgent, "id")
+	curatorAgentToken := stringField(t, curatorAgent, "token")
+
+	question := postJSON(t, curatorClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should monthly scoring work?",
+		"body":  "We need agent answer quality and curation quality to both be visible.",
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+
+	answer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", answerAgentToken, map[string]any{
+		"body": "Use answer quality for useful responses and curation quality for early recognition of useful responses.",
+	}, http.StatusCreated)
+	answerID := stringField(t, answer, "id")
+
+	now = now.Add(5 * time.Minute)
+	postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+answerID+"/like", curatorAgentToken, nil, http.StatusOK)
+	now = now.Add(time.Minute)
+	deleteJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+answerID+"/like", curatorAgentToken, http.StatusOK)
+	now = now.Add(time.Minute)
+	postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+answerID+"/like", curatorAgentToken, nil, http.StatusOK)
+	now = now.Add(3 * time.Minute)
+	postJSON(t, curatorClient, server.URL+"/api/v1/answers/"+answerID+"/like", "", nil, http.StatusOK)
+
+	detail := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK)
+	answers := listField(t, detail, "answers")
+	if len(answers) != 1 {
+		t.Fatalf("answer count = %d, want 1", len(answers))
+	}
+	if got := intField(t, answers[0].(map[string]any), "like_count"); got != 2 {
+		t.Fatalf("like_count after unlike and relike = %d, want 2", got)
+	}
+
+	agentLeaderboard := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/leaderboards/agents?period=2026-07", "", http.StatusOK)
+	answerAgentScore := leaderboardAgentScore(t, agentLeaderboard, answerAgentID)
+	if got := floatField(t, answerAgentScore, "answer_score"); got <= 0 {
+		t.Fatalf("answer agent answer_score = %f, want positive", got)
+	}
+	curatorAgentScore := leaderboardAgentScore(t, agentLeaderboard, curatorAgentID)
+	if got := floatField(t, curatorAgentScore, "curation_score"); got <= 0 {
+		t.Fatalf("curator agent curation_score = %f, want positive", got)
+	}
+	if got := floatField(t, curatorAgentScore, "answer_score"); got != 0 {
+		t.Fatalf("curator agent answer_score = %f, want 0", got)
+	}
+
+	userLeaderboard := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/leaderboards/users?period=2026-07", "", http.StatusOK)
+	answerOwnerScore := leaderboardUserScore(t, userLeaderboard, answerOwnerID)
+	if got := floatField(t, answerOwnerScore, "owned_agent_score"); got <= 0 {
+		t.Fatalf("answer owner owned_agent_score = %f, want positive", got)
+	}
+	curatorOwnerScore := leaderboardUserScore(t, userLeaderboard, curatorUserID)
+	if got := floatField(t, curatorOwnerScore, "owned_agent_score"); got <= 0 {
+		t.Fatalf("curator owner owned_agent_score = %f, want positive", got)
+	}
+
+	agentScore := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/"+answerAgentID+"/scores?period=2026-07", "", http.StatusOK)
+	if got := floatField(t, agentScore, "answer_score"); got <= 0 {
+		t.Fatalf("agent score answer_score = %f, want positive", got)
+	}
+	userScore := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/"+answerOwnerID+"/scores?period=2026-07", "", http.StatusOK)
+	if got := floatField(t, userScore, "total_score"); got <= 0 {
+		t.Fatalf("user score total_score = %f, want positive", got)
+	}
+	rewards := getJSON(t, answerOwnerClient, server.URL+"/api/v1/me/rewards?period=2026-07", "", http.StatusOK)
+	rewardScore := mapField(t, rewards, "score")
+	if got := floatField(t, rewardScore, "total_score"); got <= 0 {
+		t.Fatalf("reward total_score = %f, want positive", got)
+	}
+}
+
 func TestQuestionSearchMatchesTitleAndBody(t *testing.T) {
 	t.Parallel()
 
@@ -681,24 +889,27 @@ func TestQuestionInvitesAtMostFiveAgents(t *testing.T) {
 	server := httptest.NewServer(app.Handler())
 	defer server.Close()
 
-	userClient := newHTTPClient(t)
-	registerAndVerifyUser(t, userClient, server.URL, mailer, "owner@example.com")
-	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
-		"email":    "owner@example.com",
-		"password": testPassword,
-	}, http.StatusOK)
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "asker@example.com", "Asker")
 
-	for i := 0; i < 6; i++ {
-		postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
-			"name":         "Agent " + string(rune('A'+i)),
-			"description":  "Participates in random invitations.",
-			"tags":         []string{"random"},
-			"capabilities": []string{"answering"},
-			"is_public":    true,
-		}, http.StatusCreated)
+	agentIndex := 0
+	for ownerIndex := 0; ownerIndex < 2; ownerIndex++ {
+		ownerClient := newHTTPClient(t)
+		email := "invitation-owner-" + string(rune('a'+ownerIndex)) + "@example.com"
+		registerVerifyAndLoginUser(t, ownerClient, server.URL, mailer, email, "Invitation Owner")
+		for i := 0; i < 3; i++ {
+			postJSON(t, ownerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+				"name":         "Agent " + string(rune('A'+agentIndex)),
+				"description":  "Participates in random invitations.",
+				"tags":         []string{"random"},
+				"capabilities": []string{"answering"},
+				"is_public":    true,
+			}, http.StatusCreated)
+			agentIndex++
+		}
 	}
 
-	questionResp := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+	questionResp := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
 		"title": "How many agents should be invited?",
 		"body":  "The platform should cap random invitations at five.",
 		"tags":  []string{"random"},
@@ -1135,6 +1346,28 @@ func registerAndVerifyUser(t *testing.T, client *http.Client, apiURL string, mai
 	}, http.StatusOK)
 }
 
+func registerVerifyAndLoginUser(t *testing.T, client *http.Client, apiURL string, mailer *roundtable.MemoryMailer, email string, displayName string) string {
+	t.Helper()
+
+	resp := postJSON(t, client, apiURL+"/api/v1/auth/register", "", map[string]any{
+		"email":        email,
+		"password":     testPassword,
+		"display_name": displayName,
+	}, http.StatusCreated)
+	token, ok := mailer.VerificationToken(email)
+	if !ok {
+		t.Fatalf("verification token was not sent")
+	}
+	postJSON(t, client, apiURL+"/api/v1/auth/verify", "", map[string]any{
+		"token": token,
+	}, http.StatusOK)
+	postJSON(t, client, apiURL+"/api/v1/auth/login", "", map[string]any{
+		"email":    email,
+		"password": testPassword,
+	}, http.StatusOK)
+	return stringField(t, resp, "id")
+}
+
 func postDirectJSON(t *testing.T, handler http.Handler, path string, body map[string]any) *httptest.ResponseRecorder {
 	t.Helper()
 
@@ -1391,6 +1624,16 @@ func intField(t *testing.T, values map[string]any, name string) int {
 	return int(value)
 }
 
+func floatField(t *testing.T, values map[string]any, name string) float64 {
+	t.Helper()
+
+	value, ok := values[name].(float64)
+	if !ok {
+		t.Fatalf("field %q = %#v, want number", name, values[name])
+	}
+	return value
+}
+
 func boolField(t *testing.T, values map[string]any, name string) bool {
 	t.Helper()
 
@@ -1399,6 +1642,34 @@ func boolField(t *testing.T, values map[string]any, name string) bool {
 		t.Fatalf("field %q = %#v, want bool", name, values[name])
 	}
 	return value
+}
+
+func leaderboardAgentScore(t *testing.T, leaderboard map[string]any, agentID string) map[string]any {
+	t.Helper()
+
+	for _, raw := range listField(t, leaderboard, "items") {
+		item := raw.(map[string]any)
+		agent := mapField(t, item, "agent")
+		if stringField(t, agent, "id") == agentID {
+			return item
+		}
+	}
+	t.Fatalf("agent %s was not present in leaderboard %#v", agentID, leaderboard)
+	return nil
+}
+
+func leaderboardUserScore(t *testing.T, leaderboard map[string]any, userID string) map[string]any {
+	t.Helper()
+
+	for _, raw := range listField(t, leaderboard, "items") {
+		item := raw.(map[string]any)
+		user := mapField(t, item, "user")
+		if stringField(t, user, "id") == userID {
+			return item
+		}
+	}
+	t.Fatalf("user %s was not present in leaderboard %#v", userID, leaderboard)
+	return nil
 }
 
 func listField(t *testing.T, values map[string]any, name string) []any {

@@ -75,7 +75,7 @@ func (a *App) createQuestion(w http.ResponseWriter, r *http.Request, user curren
 		writeError(w, err)
 		return
 	}
-	invitationCount, err := a.createRandomInvitations(r.Context(), tx, questionID, now)
+	invitationCount, err := a.createRandomInvitations(r.Context(), tx, questionID, decodeStringList(tags), now)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -95,29 +95,10 @@ func (a *App) createQuestion(w http.ResponseWriter, r *http.Request, user curren
 	})
 }
 
-func (a *App) createRandomInvitations(ctx context.Context, tx *sql.Tx, questionID string, now time.Time) (int, error) {
-	rows, err := tx.QueryContext(ctx, `
-		SELECT agents.id
-		FROM agents
-		JOIN users ON users.id = agents.owner_user_id
-		WHERE agents.status = 'active'
-			AND users.status = 'active'
-			AND users.email_verified_at IS NOT NULL
-		ORDER BY RANDOM()
-		LIMIT 5
-	`)
+func (a *App) createRandomInvitations(ctx context.Context, tx *sql.Tx, questionID string, questionTags []string, now time.Time) (int, error) {
+	agentIDs, err := a.invitationAgentIDs(ctx, tx, questionTags)
 	if err != nil {
 		return 0, err
-	}
-	defer rows.Close()
-
-	agentIDs := []string{}
-	for rows.Next() {
-		var agentID string
-		if err := rows.Scan(&agentID); err != nil {
-			return 0, err
-		}
-		agentIDs = append(agentIDs, agentID)
 	}
 	expiresAt := now.Add(24 * time.Hour).Format(time.RFC3339Nano)
 	createdAt := now.Format(time.RFC3339Nano)
@@ -134,6 +115,143 @@ func (a *App) createRandomInvitations(ctx context.Context, tx *sql.Tx, questionI
 		}
 	}
 	return len(agentIDs), nil
+}
+
+func (a *App) invitationAgentIDs(ctx context.Context, tx *sql.Tx, questionTags []string) ([]string, error) {
+	selected := map[string]bool{}
+	agentIDs := []string{}
+	if len(questionTags) > 0 {
+		if err := appendTopicInvitationCandidate(ctx, tx, &agentIDs, selected, questionTags); err != nil {
+			return nil, err
+		}
+	}
+	randomTarget := len(agentIDs) + 2
+	if randomTarget > 5 {
+		randomTarget = 5
+	}
+	if err := appendInvitationCandidates(ctx, tx, &agentIDs, selected, randomTarget, `
+			SELECT agents.id
+			FROM agents
+			JOIN users ON users.id = agents.owner_user_id
+			WHERE agents.status = 'active'
+				AND users.status = 'active'
+				AND users.email_verified_at IS NOT NULL
+			ORDER BY RANDOM()
+			LIMIT 10
+		`); err != nil {
+		return nil, err
+	}
+	reputationTarget := len(agentIDs) + 2
+	if reputationTarget > 5 {
+		reputationTarget = 5
+	}
+	if err := appendInvitationCandidates(ctx, tx, &agentIDs, selected, reputationTarget, `
+			SELECT agents.id
+			FROM agents
+			JOIN users ON users.id = agents.owner_user_id
+			WHERE agents.status = 'active'
+				AND users.status = 'active'
+				AND users.email_verified_at IS NOT NULL
+			ORDER BY COALESCE((
+				SELECT scores.total_score
+				FROM agent_monthly_scores scores
+				WHERE scores.agent_id = agents.id
+				ORDER BY scores.period DESC
+				LIMIT 1
+			), 0) DESC, RANDOM()
+			LIMIT 10
+		`); err != nil {
+		return nil, err
+	}
+	if len(agentIDs) < 5 {
+		if err := appendInvitationCandidates(ctx, tx, &agentIDs, selected, 5, `
+			SELECT agents.id
+			FROM agents
+			JOIN users ON users.id = agents.owner_user_id
+			WHERE agents.status = 'active'
+				AND users.status = 'active'
+				AND users.email_verified_at IS NOT NULL
+			ORDER BY RANDOM()
+			LIMIT 10
+		`); err != nil {
+			return nil, err
+		}
+	}
+	return agentIDs, nil
+}
+
+func appendTopicInvitationCandidate(ctx context.Context, tx *sql.Tx, agentIDs *[]string, selected map[string]bool, questionTags []string) error {
+	rows, err := tx.QueryContext(ctx, `
+		SELECT agents.id, agents.tags_json, agents.capabilities_json
+		FROM agents
+		JOIN users ON users.id = agents.owner_user_id
+		WHERE agents.status = 'active'
+			AND users.status = 'active'
+			AND users.email_verified_at IS NOT NULL
+		ORDER BY RANDOM()
+		LIMIT 50
+	`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var agentID, tagsRaw, capabilitiesRaw string
+		if err := rows.Scan(&agentID, &tagsRaw, &capabilitiesRaw); err != nil {
+			return err
+		}
+		if selected[agentID] || !matchesAgentTopic(questionTags, tagsRaw, capabilitiesRaw) {
+			continue
+		}
+		*agentIDs = append(*agentIDs, agentID)
+		selected[agentID] = true
+		break
+	}
+	return rows.Err()
+}
+
+func matchesAgentTopic(questionTags []string, agentTagsRaw string, capabilitiesRaw string) bool {
+	topics := map[string]bool{}
+	for _, value := range append(decodeStringList(agentTagsRaw), decodeStringList(capabilitiesRaw)...) {
+		normalized := strings.ToLower(strings.TrimSpace(value))
+		if normalized != "" {
+			topics[normalized] = true
+		}
+	}
+	for _, tag := range questionTags {
+		if topics[strings.ToLower(strings.TrimSpace(tag))] {
+			return true
+		}
+	}
+	return false
+}
+
+func appendInvitationCandidates(ctx context.Context, tx *sql.Tx, agentIDs *[]string, selected map[string]bool, target int, query string) error {
+	if len(*agentIDs) >= target {
+		return nil
+	}
+	rows, err := tx.QueryContext(ctx, query)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var agentID string
+		if err := rows.Scan(&agentID); err != nil {
+			return err
+		}
+		if selected[agentID] {
+			continue
+		}
+		*agentIDs = append(*agentIDs, agentID)
+		selected[agentID] = true
+		if len(*agentIDs) >= target {
+			break
+		}
+	}
+	return rows.Err()
 }
 
 func (a *App) listQuestions(w http.ResponseWriter, r *http.Request) {
@@ -287,7 +405,7 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string) ([]map[
 		FROM answers ans
 		JOIN agents ag ON ag.id = ans.agent_id
 		JOIN users owner ON owner.id = ag.owner_user_id
-		LEFT JOIN votes v ON v.answer_id = ans.id
+			LEFT JOIN votes v ON v.answer_id = ans.id AND v.revoked_at IS NULL
 		WHERE ans.question_id = $1
 		GROUP BY ans.id, ans.body, ans.created_at, ag.id, ag.name, owner.display_name
 		ORDER BY like_count DESC, ans.created_at ASC
