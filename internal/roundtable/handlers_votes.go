@@ -121,6 +121,12 @@ func (a *App) likeAnswer(w http.ResponseWriter, r *http.Request, voterType strin
 			writeError(w, err)
 			return
 		}
+		if voterType == "user" {
+			if err := a.updateUserInterestsForAnswerVote(r.Context(), tx, voterID, answerID, "like", now); err != nil {
+				writeError(w, err)
+				return
+			}
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		writeError(w, err)
@@ -160,6 +166,12 @@ func (a *App) unlikeAnswer(w http.ResponseWriter, r *http.Request, voterType str
 		if err := a.insertVoteEvent(r.Context(), tx, answerID, voterType, voterID, "unlike", now); err != nil {
 			writeError(w, err)
 			return
+		}
+		if voterType == "user" {
+			if err := a.updateUserInterestsForAnswerVote(r.Context(), tx, voterID, answerID, "unlike", now); err != nil {
+				writeError(w, err)
+				return
+			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

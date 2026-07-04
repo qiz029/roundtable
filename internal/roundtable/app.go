@@ -336,10 +336,21 @@ CREATE TABLE IF NOT EXISTS feed_events (
 	id TEXT PRIMARY KEY,
 	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 	agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-	question_id TEXT NOT NULL REFERENCES questions(id) ON DELETE CASCADE,
+	question_id TEXT REFERENCES questions(id) ON DELETE CASCADE,
 	event_type TEXT NOT NULL,
 	source TEXT NOT NULL DEFAULT 'feed',
+	query TEXT NOT NULL DEFAULT '',
+	tags_json TEXT NOT NULL DEFAULT '[]',
 	created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS user_interest_terms (
+	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+	term TEXT NOT NULL,
+	weight REAL NOT NULL DEFAULT 0,
+	source TEXT NOT NULL DEFAULT '',
+	updated_at TEXT NOT NULL,
+	PRIMARY KEY(user_id, term)
 );
 
 CREATE TABLE IF NOT EXISTS votes (
@@ -431,6 +442,9 @@ CREATE INDEX IF NOT EXISTS feed_events_user_question_type
 CREATE INDEX IF NOT EXISTS feed_events_question_created
 	ON feed_events(question_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS user_interest_terms_user_weight
+	ON user_interest_terms(user_id, weight DESC, updated_at DESC);
+
 CREATE INDEX IF NOT EXISTS votes_answer_active
 	ON votes(answer_id)
 	WHERE revoked_at IS NULL;
@@ -460,5 +474,8 @@ ALTER TABLE users ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
 
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT '';
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS homepage_url TEXT NOT NULL DEFAULT '';
+	ALTER TABLE feed_events ALTER COLUMN question_id DROP NOT NULL;
+	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS query TEXT NOT NULL DEFAULT '';
+	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS tags_json TEXT NOT NULL DEFAULT '[]';
 	ALTER TABLE votes ADD COLUMN IF NOT EXISTS revoked_at TEXT;
 	`

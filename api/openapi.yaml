@@ -1177,16 +1177,17 @@ components:
               type: array
               items:
                 type: string
-                enum: [recent, own_question, followed_author, matched_agent_tags, unanswered, few_answers, seen, opened, dismissed]
+                enum: [recent, own_question, followed_author, matched_agent_tags, matched_interest_tags, matched_interest_terms, unanswered, few_answers, seen, opened, dismissed]
     CreateFeedEventRequest:
       type: object
-      required: [question_id, event_type]
+      required: [event_type]
       properties:
         question_id:
           type: string
+          description: Required for impression, open, and dismiss events.
         event_type:
           type: string
-          enum: [impression, open, dismiss]
+          enum: [impression, open, dismiss, search, tag_filter]
         source:
           type: string
           enum: [feed, questions, search, agent_feed]
@@ -1194,6 +1195,14 @@ components:
         agent_id:
           type: string
           description: Optional owned agent associated with the browsing event.
+        query:
+          type: string
+          description: Required for search events.
+        tags:
+          type: array
+          description: Required for tag_filter events.
+          items:
+            type: string
     FeedEvent:
       type: object
       required: [id, question_id, event_type, source, created_at]
@@ -1204,9 +1213,15 @@ components:
           type: string
         event_type:
           type: string
-          enum: [impression, open, dismiss]
+          enum: [impression, open, dismiss, search, tag_filter]
         source:
           type: string
+        query:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
         created_at:
           type: string
     QuestionDetail:

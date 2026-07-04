@@ -24,7 +24,8 @@ type feedQuestion struct {
 }
 
 type feedSignals struct {
-	Terms map[string]bool
+	AgentTerms    map[string]bool
+	InterestTerms map[string]float64
 }
 
 func (a *App) handleFeed(w http.ResponseWriter, r *http.Request) {
@@ -47,27 +48,44 @@ func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		QuestionID string `json:"question_id"`
-		EventType  string `json:"event_type"`
-		Source     string `json:"source"`
-		AgentID    string `json:"agent_id"`
+		QuestionID string   `json:"question_id"`
+		EventType  string   `json:"event_type"`
+		Source     string   `json:"source"`
+		AgentID    string   `json:"agent_id"`
+		Query      string   `json:"query"`
+		Tags       []string `json:"tags"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err)
 		return
 	}
 	questionID := strings.TrimSpace(req.QuestionID)
-	if questionID == "" {
+	eventType := strings.TrimSpace(req.EventType)
+	if !validFeedEventType(eventType) {
+		writeError(w, errInvalidInput("event_type must be impression, open, dismiss, search, or tag_filter"))
+		return
+	}
+	if eventRequiresQuestion(eventType) && questionID == "" {
 		writeError(w, errInvalidInput("question_id is required"))
 		return
 	}
-	if !a.questionExists(r.Context(), questionID) {
+	if questionID != "" && !a.questionExists(r.Context(), questionID) {
 		writeError(w, errNotFound("question not found"))
 		return
 	}
-	eventType := strings.TrimSpace(req.EventType)
-	if !validFeedEventType(eventType) {
-		writeError(w, errInvalidInput("event_type must be impression, open, or dismiss"))
+	query := strings.TrimSpace(req.Query)
+	if eventType == "search" && len(questionSearchTerms(query)) == 0 {
+		writeError(w, errInvalidInput("query is required for search events"))
+		return
+	}
+	tags := normalizedQuestionTags(req.Tags)
+	if eventType == "tag_filter" && len(tags) == 0 {
+		writeError(w, errInvalidInput("tags are required for tag_filter events"))
+		return
+	}
+	tagsRaw, err := encodeStringList(tags)
+	if err != nil {
+		writeError(w, err)
 		return
 	}
 	source := strings.TrimSpace(req.Source)
@@ -90,22 +108,43 @@ func (a *App) handleFeedEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	createdAt := a.now().UTC().Format(time.RFC3339Nano)
-	_, err = a.db.ExecContext(r.Context(), `
-		INSERT INTO feed_events (id, user_id, agent_id, question_id, event_type, source, created_at)
-		VALUES ($1, $2, NULLIF($3, ''), $4, $5, $6, $7)
-	`, eventID, user.ID, agentID, questionID, eventType, source, createdAt)
+	tx, err := a.db.BeginTx(r.Context(), nil)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(r.Context(), `
+		INSERT INTO feed_events (id, user_id, agent_id, question_id, event_type, source, query, tags_json, created_at)
+		VALUES ($1, $2, NULLIF($3, ''), NULLIF($4, ''), $5, $6, $7, $8, $9)
+	`, eventID, user.ID, agentID, questionID, eventType, source, query, tagsRaw, createdAt)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := a.updateUserInterestsForFeedEvent(r.Context(), tx, user.ID, eventType, questionID, query, tags, createdAt); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		writeError(w, err)
+		return
+	}
 
-	writeJSON(w, http.StatusCreated, map[string]any{
+	response := map[string]any{
 		"id":          eventID,
 		"question_id": questionID,
 		"event_type":  eventType,
 		"source":      source,
 		"created_at":  createdAt,
-	})
+	}
+	if query != "" {
+		response["query"] = query
+	}
+	if len(tags) > 0 {
+		response["tags"] = tags
+	}
+	writeJSON(w, http.StatusCreated, response)
 }
 
 func (a *App) handleAgentFeed(w http.ResponseWriter, r *http.Request) {
@@ -146,7 +185,10 @@ func (a *App) listFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	signals := feedSignals{Terms: map[string]bool{}}
+	signals := feedSignals{
+		AgentTerms:    map[string]bool{},
+		InterestTerms: map[string]float64{},
+	}
 	if hasUser {
 		signals, err = a.feedSignalsForUser(r.Context(), user.ID)
 		if err != nil {
@@ -277,16 +319,42 @@ func (a *App) feedSignalsForUser(ctx context.Context, userID string) (feedSignal
 	}
 	defer rows.Close()
 
-	signals := feedSignals{Terms: map[string]bool{}}
+	signals := feedSignals{
+		AgentTerms:    map[string]bool{},
+		InterestTerms: map[string]float64{},
+	}
 	for rows.Next() {
 		var tagsRaw, capabilitiesRaw string
 		if err := rows.Scan(&tagsRaw, &capabilitiesRaw); err != nil {
 			return feedSignals{}, err
 		}
-		addFeedTerms(signals.Terms, decodeStringList(tagsRaw))
-		addFeedTerms(signals.Terms, decodeStringList(capabilitiesRaw))
+		addFeedTerms(signals.AgentTerms, decodeStringList(tagsRaw))
+		addFeedTerms(signals.AgentTerms, decodeStringList(capabilitiesRaw))
 	}
-	return signals, rows.Err()
+	if err := rows.Err(); err != nil {
+		return feedSignals{}, err
+	}
+
+	interestRows, err := a.db.QueryContext(ctx, `
+		SELECT term, weight
+		FROM user_interest_terms
+		WHERE user_id = $1 AND weight <> 0
+		ORDER BY ABS(weight) DESC, updated_at DESC
+		LIMIT 100
+	`, userID)
+	if err != nil {
+		return feedSignals{}, err
+	}
+	defer interestRows.Close()
+	for interestRows.Next() {
+		var term string
+		var weight float64
+		if err := interestRows.Scan(&term, &weight); err != nil {
+			return feedSignals{}, err
+		}
+		signals.InterestTerms[term] = weight
+	}
+	return signals, interestRows.Err()
 }
 
 func (a *App) feedSignalsForAgent(ctx context.Context, agentID string) (feedSignals, error) {
@@ -300,9 +368,12 @@ func (a *App) feedSignalsForAgent(ctx context.Context, agentID string) (feedSign
 	if err := row.Scan(&tagsRaw, &capabilitiesRaw); err != nil {
 		return feedSignals{}, err
 	}
-	signals := feedSignals{Terms: map[string]bool{}}
-	addFeedTerms(signals.Terms, decodeStringList(tagsRaw))
-	addFeedTerms(signals.Terms, decodeStringList(capabilitiesRaw))
+	signals := feedSignals{
+		AgentTerms:    map[string]bool{},
+		InterestTerms: map[string]float64{},
+	}
+	addFeedTerms(signals.AgentTerms, decodeStringList(tagsRaw))
+	addFeedTerms(signals.AgentTerms, decodeStringList(capabilitiesRaw))
 	return signals, nil
 }
 
@@ -321,10 +392,19 @@ func scoreFeedQuestion(question feedQuestion, user currentUser, hasUser bool, si
 		score += 60
 		reasons = append(reasons, "followed_author")
 	}
-	matches := feedMatchCount(question, signals)
+	matches := feedMatchCount(question, signals.AgentTerms)
 	if matches > 0 {
 		score += matches * 50
 		reasons = append(reasons, "matched_agent_tags")
+	}
+	interestScore, interestReasons := feedInterestScore(question, signals.InterestTerms)
+	if interestScore != 0 {
+		if question.OpenCount == 0 && question.DismissCount == 0 {
+			score += interestScore
+			reasons = append(reasons, interestReasons...)
+		} else if interestScore < 0 {
+			score += interestScore
+		}
 	}
 	if question.AnswerCount == 0 {
 		score += 15
@@ -351,8 +431,8 @@ func scoreFeedQuestion(question feedQuestion, user currentUser, hasUser bool, si
 	return score, reasons
 }
 
-func feedMatchCount(question feedQuestion, signals feedSignals) int {
-	if len(signals.Terms) == 0 {
+func feedMatchCount(question feedQuestion, signalTerms map[string]bool) int {
+	if len(signalTerms) == 0 {
 		return 0
 	}
 	questionTerms := map[string]bool{}
@@ -360,12 +440,59 @@ func feedMatchCount(question feedQuestion, signals feedSignals) int {
 	addFeedTerms(questionTerms, questionSearchTerms(question.Title+" "+question.Body))
 
 	matches := 0
-	for term := range signals.Terms {
+	for term := range signalTerms {
 		if questionTerms[term] {
 			matches++
 		}
 	}
 	return matches
+}
+
+func feedInterestScore(question feedQuestion, interests map[string]float64) (int, []string) {
+	if len(interests) == 0 {
+		return 0, nil
+	}
+	score := 0
+	matchedTags := false
+	matchedTerms := false
+	tagSeen := map[string]bool{}
+	for _, tag := range normalizedQuestionTags(decodeStringList(question.TagsRaw)) {
+		tagSeen[tag] = true
+		weight, ok := interests[tag]
+		if !ok {
+			continue
+		}
+		score += int(weight * 8)
+		if weight > 0 {
+			matchedTags = true
+		}
+	}
+	for _, term := range questionSearchTerms(question.Title + " " + question.Body) {
+		if tagSeen[term] {
+			continue
+		}
+		weight, ok := interests[term]
+		if !ok {
+			continue
+		}
+		score += int(weight * 3)
+		if weight > 0 {
+			matchedTerms = true
+		}
+	}
+	if score > 120 {
+		score = 120
+	} else if score < -120 {
+		score = -120
+	}
+	reasons := []string{}
+	if matchedTags {
+		reasons = append(reasons, "matched_interest_tags")
+	}
+	if matchedTerms {
+		reasons = append(reasons, "matched_interest_terms")
+	}
+	return score, reasons
 }
 
 func addFeedTerms(dst map[string]bool, values []string) {
@@ -377,6 +504,15 @@ func addFeedTerms(dst map[string]bool, values []string) {
 }
 
 func validFeedEventType(eventType string) bool {
+	switch eventType {
+	case "impression", "open", "dismiss", "search", "tag_filter":
+		return true
+	default:
+		return false
+	}
+}
+
+func eventRequiresQuestion(eventType string) bool {
 	switch eventType {
 	case "impression", "open", "dismiss":
 		return true

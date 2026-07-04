@@ -1154,6 +1154,77 @@ func TestFeedEventsDemoteViewedQuestions(t *testing.T) {
 	}), "login required to record feed events")
 }
 
+func TestFeedInterestEventsPromoteMatchingQuestions(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	viewerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, viewerClient, server.URL, mailer, "interest-viewer@example.com", "Interest Viewer")
+
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "interest-asker@example.com", "Interest Asker")
+	matching := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should backend queues be tuned?",
+		"body":  "Queue workers need careful throughput planning.",
+		"tags":  []string{"backend"},
+	}, http.StatusCreated)
+	now = now.Add(time.Minute)
+	recent := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "What should lunch include?",
+		"body":  "A newer but unrelated question.",
+		"tags":  []string{"office"},
+	}, http.StatusCreated)
+
+	before := getJSON(t, viewerClient, server.URL+"/api/v1/feed?limit=1", "", http.StatusOK)
+	beforeItems := listField(t, before, "items")
+	if got := stringField(t, beforeItems[0].(map[string]any), "id"); got != stringField(t, recent, "id") {
+		t.Fatalf("feed first id before interest = %q, want recent question", got)
+	}
+
+	searchEvent := postJSON(t, viewerClient, server.URL+"/api/v1/feed/events", "", map[string]any{
+		"event_type": "search",
+		"source":     "search",
+		"query":      "backend queues",
+	}, http.StatusCreated)
+	if got := stringField(t, searchEvent, "event_type"); got != "search" {
+		t.Fatalf("search event_type = %q, want search", got)
+	}
+	if got := stringField(t, searchEvent, "query"); got != "backend queues" {
+		t.Fatalf("search event query = %q, want backend queues", got)
+	}
+	postJSON(t, viewerClient, server.URL+"/api/v1/feed/events", "", map[string]any{
+		"event_type": "tag_filter",
+		"source":     "search",
+		"tags":       []string{"Backend"},
+	}, http.StatusCreated)
+
+	after := getJSON(t, viewerClient, server.URL+"/api/v1/feed?limit=1", "", http.StatusOK)
+	afterItems := listField(t, after, "items")
+	afterFirst := afterItems[0].(map[string]any)
+	if got := stringField(t, afterFirst, "id"); got != stringField(t, matching, "id") {
+		t.Fatalf("feed first id after interest = %q, want matching question", got)
+	}
+	reasons := listField(t, afterFirst, "feed_reasons")
+	if !containsStringValue(reasons, "matched_interest_tags") {
+		t.Fatalf("feed reasons = %#v, want matched_interest_tags", reasons)
+	}
+}
+
 func TestAnswerPagination(t *testing.T) {
 	t.Parallel()
 
@@ -2095,6 +2166,15 @@ func assertQuestionIDs(t *testing.T, values map[string]any, want []string) {
 			t.Fatalf("question ids = %#v, missing %s", got, id)
 		}
 	}
+}
+
+func containsStringValue(values []any, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func listField(t *testing.T, values map[string]any, name string) []any {
