@@ -295,6 +295,7 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 
 	assertSelectable(t, db, `SELECT full_name, bio, background, avatar_url, website_url, social_links_json FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT agent_limit FROM users LIMIT 0`)
+	assertSelectable(t, db, `SELECT is_seed_user FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT instructions, homepage_url FROM agents LIMIT 0`)
 	assertSelectable(t, db, `SELECT answer_id, query, tags_json FROM feed_events LIMIT 0`)
 	assertSelectable(t, db, `SELECT follower_user_id, followee_user_id, created_at FROM user_follows LIMIT 0`)
@@ -304,6 +305,89 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	assertSelectable(t, db, `SELECT period, agent_id, owner_user_id, total_score, rank, details_json FROM agent_monthly_scores LIMIT 0`)
 	assertSelectable(t, db, `SELECT period, user_id, total_score, rank, details_json FROM user_monthly_scores LIMIT 0`)
 	assertSelectable(t, db, `SELECT answer_id, author_user_id, reply_to_comment_id, mentions_json, deleted_at FROM answer_comments LIMIT 0`)
+}
+
+func TestSeedUserMarkerIsExposedAndReadOnly(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := newTestDatabaseURL(t)
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatalf("open postgres: %v", err)
+	}
+	defer db.Close()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := roundtable.NewApp(roundtable.Options{
+		DatabaseURL: databaseURL,
+		Mailer:      mailer,
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	created := postJSON(t, userClient, server.URL+"/api/v1/auth/register", "", map[string]any{
+		"email":        "seed@example.com",
+		"password":     testPassword,
+		"display_name": "Seed User",
+	}, http.StatusCreated)
+	if boolField(t, created, "is_seed_user") {
+		t.Fatal("registered user is_seed_user = true, want false")
+	}
+	token, ok := mailer.VerificationToken("seed@example.com")
+	if !ok {
+		t.Fatalf("verification token was not sent")
+	}
+	postJSON(t, userClient, server.URL+"/api/v1/auth/verify", "", map[string]any{
+		"token": token,
+	}, http.StatusOK)
+	postJSON(t, userClient, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "seed@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+
+	initialMe := getJSON(t, userClient, server.URL+"/api/v1/auth/me", "", http.StatusOK)
+	if boolField(t, initialMe, "is_seed_user") {
+		t.Fatal("initial auth/me is_seed_user = true, want false")
+	}
+	userID := stringField(t, initialMe, "id")
+
+	if _, err := db.ExecContext(context.Background(), `
+		UPDATE users SET is_seed_user = TRUE WHERE id = $1
+	`, userID); err != nil {
+		t.Fatalf("mark seed user: %v", err)
+	}
+
+	seedMe := getJSON(t, userClient, server.URL+"/api/v1/auth/me", "", http.StatusOK)
+	if !boolField(t, seedMe, "is_seed_user") {
+		t.Fatal("auth/me is_seed_user = false, want true")
+	}
+	seedPrivate := getJSON(t, userClient, server.URL+"/api/v1/me/profile", "", http.StatusOK)
+	if !boolField(t, seedPrivate, "is_seed_user") {
+		t.Fatal("private profile is_seed_user = false, want true")
+	}
+	seedPublic := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/"+userID+"/profile", "", http.StatusOK)
+	if !boolField(t, seedPublic, "is_seed_user") {
+		t.Fatal("public profile is_seed_user = false, want true")
+	}
+
+	rejected := patchJSON(t, userClient, server.URL+"/api/v1/me/profile", "", map[string]any{
+		"is_seed_user": false,
+	}, http.StatusBadRequest)
+	if got := rejected["code"]; got != "invalid_input" {
+		t.Fatalf("patch is_seed_user code = %#v, want invalid_input", got)
+	}
+	patched := patchJSON(t, userClient, server.URL+"/api/v1/me/profile", "", map[string]any{
+		"display_name": "Seed User Renamed",
+	}, http.StatusOK)
+	if !boolField(t, patched, "is_seed_user") {
+		t.Fatal("profile patch changed is_seed_user, want read-only true")
+	}
 }
 
 func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {

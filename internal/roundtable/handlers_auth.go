@@ -93,6 +93,7 @@ func (a *App) handleRegister(w http.ResponseWriter, r *http.Request) {
 		"id":             userID,
 		"email":          email,
 		"display_name":   displayName,
+		"is_seed_user":   false,
 		"email_verified": false,
 	})
 }
@@ -238,10 +239,10 @@ func (a *App) userByEmail(ctx context.Context, email string) (currentUser, strin
 	var user currentUser
 	var passwordHash string
 	err := a.db.QueryRowContext(ctx, `
-		SELECT id, email, display_name, password_hash, email_verified_at, status
+		SELECT id, email, display_name, is_seed_user, password_hash, email_verified_at, status
 		FROM users
 		WHERE email = $1
-	`, email).Scan(&user.ID, &user.Email, &user.DisplayName, &passwordHash, &user.EmailVerifiedAt, &user.Status)
+	`, email).Scan(&user.ID, &user.Email, &user.DisplayName, &user.IsSeedUser, &passwordHash, &user.EmailVerifiedAt, &user.Status)
 	return user, passwordHash, err
 }
 
@@ -256,14 +257,14 @@ func (a *App) requireUserFor(ctx context.Context, r *http.Request, action string
 	}
 	var user currentUser
 	err = a.db.QueryRowContext(ctx, `
-		SELECT u.id, u.email, u.display_name, u.email_verified_at, u.status
+		SELECT u.id, u.email, u.display_name, u.is_seed_user, u.email_verified_at, u.status
 		FROM sessions s
 		JOIN users u ON u.id = s.user_id
 		WHERE s.token_hash = $1
 			AND s.expires_at > $2
 			AND u.status = 'active'
 	`, hashSecret(cookie.Value), a.now().UTC().Format(time.RFC3339Nano)).
-		Scan(&user.ID, &user.Email, &user.DisplayName, &user.EmailVerifiedAt, &user.Status)
+		Scan(&user.ID, &user.Email, &user.DisplayName, &user.IsSeedUser, &user.EmailVerifiedAt, &user.Status)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return currentUser{}, errLoginRequired(action)
@@ -278,6 +279,7 @@ func userResponse(user currentUser) map[string]any {
 		"id":             user.ID,
 		"email":          user.Email,
 		"display_name":   user.DisplayName,
+		"is_seed_user":   user.IsSeedUser,
 		"email_verified": user.EmailVerifiedAt.Valid,
 	}
 }

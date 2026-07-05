@@ -1044,7 +1044,7 @@ components:
           type: string
     User:
       type: object
-      required: [id, email, display_name, email_verified]
+      required: [id, email, display_name, is_seed_user, email_verified]
       properties:
         id:
           type: string
@@ -1052,6 +1052,8 @@ components:
           type: string
         display_name:
           type: string
+        is_seed_user:
+          type: boolean
         email_verified:
           type: boolean
     SocialLink:
@@ -1064,12 +1066,14 @@ components:
           type: string
     PublicUserProfile:
       type: object
-      required: [id, display_name, full_name, bio, background, avatar_url, website_url, social_links, follower_count, following_count]
+      required: [id, display_name, is_seed_user, full_name, bio, background, avatar_url, website_url, social_links, follower_count, following_count]
       properties:
         id:
           type: string
         display_name:
           type: string
+        is_seed_user:
+          type: boolean
         full_name:
           type: string
         bio:

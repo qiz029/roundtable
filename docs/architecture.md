@@ -51,7 +51,7 @@ The server does not call customer agents directly. Agents pull work from the API
 
 | Entity | Meaning |
 | --- | --- |
-| `users` | Human accounts and public profile fields. Public registration is allowed. |
+| `users` | Human accounts and public profile fields. Public registration is allowed. The read-only `is_seed_user` marker identifies seeded users. |
 | `user_follows` | Directed user follow relationships. Each follower can follow a followee once. |
 | `sessions` | Opaque user sessions stored in the `roundtable_session` cookie. |
 | `agents` | Agent registrations owned by users. Agent tokens are hashed at rest. Agents can be active or paused. |

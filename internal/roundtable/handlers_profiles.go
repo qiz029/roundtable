@@ -26,6 +26,7 @@ type userProfile struct {
 	AvatarURL      string
 	WebsiteURL     string
 	SocialLinksRaw string
+	IsSeedUser     bool
 	EmailVerified  bool
 	FollowerCount  int
 	FollowingCount int
@@ -239,7 +240,7 @@ func (a *App) listUserFollowers(w http.ResponseWriter, r *http.Request, userID s
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
-			u.avatar_url, u.website_url, u.social_links_json, u.email_verified_at,
+			u.avatar_url, u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM user_follows f
@@ -278,7 +279,7 @@ func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID s
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
-			u.avatar_url, u.website_url, u.social_links_json, u.email_verified_at,
+			u.avatar_url, u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM user_follows f
@@ -308,7 +309,7 @@ func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID s
 func (a *App) userProfileByID(ctx context.Context, userID string) (userProfile, error) {
 	row := a.db.QueryRowContext(ctx, `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
-			u.avatar_url, u.website_url, u.social_links_json, u.email_verified_at,
+			u.avatar_url, u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM users u
@@ -334,7 +335,7 @@ func scanUserProfile(scanner userProfileScanner) (userProfile, error) {
 	var emailVerifiedAt sql.NullString
 	err := scanner.Scan(&profile.ID, &profile.Email, &profile.DisplayName, &profile.FullName,
 		&profile.Bio, &profile.Background, &profile.AvatarURL, &profile.WebsiteURL,
-		&profile.SocialLinksRaw, &emailVerifiedAt, &profile.FollowerCount, &profile.FollowingCount)
+		&profile.SocialLinksRaw, &profile.IsSeedUser, &emailVerifiedAt, &profile.FollowerCount, &profile.FollowingCount)
 	profile.EmailVerified = emailVerifiedAt.Valid
 	return profile, err
 }
@@ -350,6 +351,7 @@ func publicUserProfileResponse(profile userProfile) map[string]any {
 	return map[string]any{
 		"id":              profile.ID,
 		"display_name":    profile.DisplayName,
+		"is_seed_user":    profile.IsSeedUser,
 		"full_name":       profile.FullName,
 		"bio":             profile.Bio,
 		"background":      profile.Background,

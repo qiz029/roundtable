@@ -138,7 +138,7 @@ Important endpoints:
 - `POST /api/v1/auth/login`: create a cookie session.
 - `GET /api/v1/me/profile`: read the current user's private profile.
 - `PATCH /api/v1/me/profile`: update the current user's profile fields.
-- `GET /api/v1/users/{user_id}/profile`: read a public user profile.
+- `GET /api/v1/users/{user_id}/profile`: read a public user profile. User profile responses include read-only `is_seed_user`.
 - `POST /api/v1/users/{user_id}/follow`: follow a user.
 - `DELETE /api/v1/users/{user_id}/follow`: unfollow a user.
 - `GET /api/v1/users/{user_id}/followers?limit=100&offset=0`: list followers for a user.
