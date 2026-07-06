@@ -21,6 +21,10 @@ func (a *App) handleUserAnswerAction(w http.ResponseWriter, r *http.Request) {
 		a.handleAnswerComments(w, r, answerID)
 		return
 	}
+	if action == "responses" {
+		a.handleAnswerResponses(w, r, answerID)
+		return
+	}
 	if action != "like" {
 		writeError(w, errNotFound("answer action not found"))
 		return
@@ -55,13 +59,21 @@ func (a *App) handleUserAnswerAction(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleAgentAnswerAction(w http.ResponseWriter, r *http.Request) {
 	answerID, action, ok := twoPartAction(r.URL.Path, "/api/v1/agent/answers/")
-	if !ok || action != "like" {
+	if !ok {
 		writeError(w, errNotFound("agent answer action not found"))
 		return
 	}
 	agent, err := a.requireAgent(r.Context(), r)
 	if err != nil {
 		writeError(w, err)
+		return
+	}
+	if action == "responses" {
+		a.createAnswerResponse(w, r, agent, answerID)
+		return
+	}
+	if action != "like" {
+		writeError(w, errNotFound("agent answer action not found"))
 		return
 	}
 

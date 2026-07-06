@@ -13,6 +13,8 @@ SECOND_AGENT_HOME="$(mktemp -d)"
 QUESTION_OUT="$(mktemp)"
 FEED_OUT="$(mktemp)"
 ANSWERS_OUT="$(mktemp)"
+RESPONSES_OUT="$(mktemp)"
+RESPONSE_OUT="$(mktemp)"
 RUN_OUT="$(mktemp)"
 
 cleanup() {
@@ -20,7 +22,7 @@ cleanup() {
     cd "$ROOT_DIR"
     compose down -v --remove-orphans >/dev/null 2>&1 || true
   )
-  rm -f "$COOKIE_JAR" "$VOTER_COOKIE_JAR" "$QUESTION_OUT" "$FEED_OUT" "$ANSWERS_OUT" "$RUN_OUT"
+  rm -f "$COOKIE_JAR" "$VOTER_COOKIE_JAR" "$QUESTION_OUT" "$FEED_OUT" "$ANSWERS_OUT" "$RESPONSES_OUT" "$RESPONSE_OUT" "$RUN_OUT"
   rm -rf "$AGENT_HOME" "$SECOND_AGENT_HOME"
 }
 
@@ -152,6 +154,29 @@ if [[ "$LISTED_ANSWER_ID" != "$ANSWER_ID" ]]; then
   echo "CLI listed answer ${LISTED_ANSWER_ID}, expected ${ANSWER_ID}" >&2
   exit 1
 fi
+sleep 1
+HOME="$SECOND_AGENT_HOME" go run ./cmd/roundtable-agent responses submit --answer "$ANSWER_ID" --stance disagree --body "Dockerized CLI response" >"$RESPONSE_OUT"
+RESPONSE_ID="$(json_field id < "$RESPONSE_OUT")"
+RESPONSE_BODY="$(json_field body < "$RESPONSE_OUT")"
+if [[ "$RESPONSE_BODY" != "Dockerized CLI response" ]]; then
+  echo "unexpected response body: ${RESPONSE_BODY}" >&2
+  exit 1
+fi
+sleep 1
+HOME="$SECOND_AGENT_HOME" go run ./cmd/roundtable-agent responses update "$RESPONSE_ID" --stance clarify --body "Updated Dockerized CLI response" >"$RESPONSE_OUT"
+UPDATED_RESPONSE_BODY="$(json_field body < "$RESPONSE_OUT")"
+if [[ "$UPDATED_RESPONSE_BODY" != "Updated Dockerized CLI response" ]]; then
+  echo "unexpected updated response body: ${UPDATED_RESPONSE_BODY}" >&2
+  exit 1
+fi
+sleep 1
+HOME="$SECOND_AGENT_HOME" go run ./cmd/roundtable-agent responses list --answer "$ANSWER_ID" >"$RESPONSES_OUT"
+LISTED_RESPONSE_ID="$(json_field items.0.id < "$RESPONSES_OUT")"
+if [[ "$LISTED_RESPONSE_ID" != "$RESPONSE_ID" ]]; then
+  echo "CLI listed response ${LISTED_RESPONSE_ID}, expected ${RESPONSE_ID}" >&2
+  exit 1
+fi
+sleep 1
 HOME="$SECOND_AGENT_HOME" go run ./cmd/roundtable-agent answers like "$ANSWER_ID" >/dev/null
 
 DETAIL="$(curl -fsS "${API_URL}/api/v1/questions/${QUESTION_ID}")"

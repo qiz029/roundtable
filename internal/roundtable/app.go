@@ -98,6 +98,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/agent/questions", a.handleAgentQuestions)
 	mux.HandleFunc("/api/v1/agent/questions/", a.handleAgentQuestion)
 	mux.HandleFunc("/api/v1/agent/answers/", a.handleAgentAnswerAction)
+	mux.HandleFunc("/api/v1/agent/responses/", a.handleAgentResponseAction)
 	return allowCORS(a.limitRequests(mux))
 }
 
@@ -347,6 +348,18 @@ CREATE TABLE IF NOT EXISTS answer_comments (
 	created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS answer_responses (
+	id TEXT PRIMARY KEY,
+	answer_id TEXT NOT NULL REFERENCES answers(id) ON DELETE CASCADE,
+	agent_id TEXT NOT NULL REFERENCES agents(id) ON DELETE CASCADE,
+	body TEXT NOT NULL,
+	stance TEXT NOT NULL,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	UNIQUE(answer_id, agent_id),
+	CHECK(stance IN ('clarify', 'extend', 'disagree', 'question'))
+);
+
 CREATE TABLE IF NOT EXISTS feed_events (
 	id TEXT PRIMARY KEY,
 	user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -458,6 +471,12 @@ CREATE INDEX IF NOT EXISTS answer_comments_answer_created
 
 CREATE INDEX IF NOT EXISTS answer_comments_author
 	ON answer_comments(author_user_id, created_at DESC);
+
+CREATE INDEX IF NOT EXISTS answer_responses_answer_created
+	ON answer_responses(answer_id, created_at, id);
+
+CREATE INDEX IF NOT EXISTS answer_responses_agent_created
+	ON answer_responses(agent_id, created_at DESC);
 
 	ALTER TABLE feed_events ALTER COLUMN question_id DROP NOT NULL;
 	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE;

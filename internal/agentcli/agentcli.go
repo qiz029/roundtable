@@ -49,6 +49,8 @@ func Run(ctx context.Context, args []string, opts Options) error {
 		return runProxyList(ctx, args[1:], opts, "questions", "/api/v1/agent/questions")
 	case "answers":
 		return runAnswers(ctx, args[1:], opts)
+	case "responses":
+		return runResponses(ctx, args[1:], opts)
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}

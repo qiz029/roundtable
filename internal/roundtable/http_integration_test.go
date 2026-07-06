@@ -305,6 +305,7 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	assertSelectable(t, db, `SELECT period, agent_id, owner_user_id, total_score, rank, details_json FROM agent_monthly_scores LIMIT 0`)
 	assertSelectable(t, db, `SELECT period, user_id, total_score, rank, details_json FROM user_monthly_scores LIMIT 0`)
 	assertSelectable(t, db, `SELECT answer_id, author_user_id, reply_to_comment_id, mentions_json, deleted_at FROM answer_comments LIMIT 0`)
+	assertSelectable(t, db, `SELECT answer_id, agent_id, body, stance, created_at, updated_at FROM answer_responses LIMIT 0`)
 }
 
 func TestSeedUserMarkerIsExposedAndReadOnly(t *testing.T) {
@@ -1731,6 +1732,177 @@ func TestAnswerCommentsCreateReplyListDeleteAndCounts(t *testing.T) {
 
 	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/ans_missing/comments", "", http.StatusNotFound)
 	deleteJSON(t, commenterClient, server.URL+"/api/v1/comments/cmt_missing", "", http.StatusNotFound)
+}
+
+func TestAnswerResponsesCreateUpdateListAndGuardrails(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "response-asker@example.com", "Response Asker")
+
+	firstOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, firstOwnerClient, server.URL, mailer, "response-agent-one@example.com", "Response Agent One Owner")
+	firstAgent := postJSON(t, firstOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Response Agent One",
+		"is_public": true,
+	}, http.StatusCreated)
+	firstAgentToken := stringField(t, firstAgent, "token")
+	firstOwnerSecondAgent := postJSON(t, firstOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Same Owner Response Agent",
+		"is_public": true,
+	}, http.StatusCreated)
+	firstOwnerSecondAgentToken := stringField(t, firstOwnerSecondAgent, "token")
+
+	secondOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, secondOwnerClient, server.URL, mailer, "response-agent-two@example.com", "Response Agent Two Owner")
+	secondAgent := postJSON(t, secondOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Response Agent Two",
+		"is_public": true,
+	}, http.StatusCreated)
+	secondAgentToken := stringField(t, secondAgent, "token")
+
+	thirdOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, thirdOwnerClient, server.URL, mailer, "response-agent-three@example.com", "Response Agent Three Owner")
+	thirdAgent := postJSON(t, thirdOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Response Agent Three",
+		"is_public": true,
+	}, http.StatusCreated)
+	thirdAgentToken := stringField(t, thirdAgent, "token")
+
+	question := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should answer responses work?",
+		"body":  "Agents should add bounded counterpoints without creating an infinite thread.",
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+	firstAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", firstAgentToken, map[string]any{
+		"body": "Responses should be annotations, not conversation turns.",
+	}, http.StatusCreated)
+	firstAnswerID := stringField(t, firstAnswer, "id")
+
+	empty := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/"+firstAnswerID+"/responses", "", http.StatusOK)
+	if got := len(listField(t, empty, "items")); got != 0 {
+		t.Fatalf("initial responses count = %d, want 0", got)
+	}
+
+	self := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+firstAnswerID+"/responses", firstAgentToken, map[string]any{
+		"body":   "I should not respond to myself.",
+		"stance": "extend",
+	}, http.StatusForbidden)
+	if got := self["code"]; got != "forbidden" {
+		t.Fatalf("self response code = %#v, want forbidden", got)
+	}
+	sameOwner := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+firstAnswerID+"/responses", firstOwnerSecondAgentToken, map[string]any{
+		"body":   "Same owner agents should not manufacture agreement.",
+		"stance": "extend",
+	}, http.StatusForbidden)
+	if got := sameOwner["code"]; got != "forbidden" {
+		t.Fatalf("same-owner response code = %#v, want forbidden", got)
+	}
+	badStance := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+firstAnswerID+"/responses", secondAgentToken, map[string]any{
+		"body":   "This stance is unsupported.",
+		"stance": "debate",
+	}, http.StatusBadRequest)
+	if got := badStance["code"]; got != "invalid_input" {
+		t.Fatalf("bad stance code = %#v, want invalid_input", got)
+	}
+
+	firstResponse := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+firstAnswerID+"/responses", secondAgentToken, map[string]any{
+		"body":   "  This should stay bounded and factual.  ",
+		"stance": "disagree",
+	}, http.StatusCreated)
+	firstResponseID := stringField(t, firstResponse, "id")
+	if got := stringField(t, firstResponse, "body"); got != "This should stay bounded and factual." {
+		t.Fatalf("response body = %q", got)
+	}
+	if got := stringField(t, firstResponse, "stance"); got != "disagree" {
+		t.Fatalf("response stance = %q", got)
+	}
+	firstResponseAgent := mapField(t, firstResponse, "agent")
+	if got := stringField(t, firstResponseAgent, "name"); got != "Response Agent Two" {
+		t.Fatalf("response agent name = %q", got)
+	}
+
+	duplicate := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+firstAnswerID+"/responses", secondAgentToken, map[string]any{
+		"body":   "A second response should not be allowed.",
+		"stance": "extend",
+	}, http.StatusConflict)
+	if got := duplicate["code"]; got != "conflict" {
+		t.Fatalf("duplicate response code = %#v, want conflict", got)
+	}
+
+	now = now.Add(time.Minute)
+	secondResponse := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+firstAnswerID+"/responses", thirdAgentToken, map[string]any{
+		"body":   "Another agent can add a separate bounded response.",
+		"stance": "question",
+	}, http.StatusCreated)
+	secondResponseID := stringField(t, secondResponse, "id")
+
+	forbiddenUpdate := patchJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/responses/"+firstResponseID, thirdAgentToken, map[string]any{
+		"body": "Only the responding agent can update.",
+	}, http.StatusForbidden)
+	if got := forbiddenUpdate["code"]; got != "forbidden" {
+		t.Fatalf("forbidden update code = %#v, want forbidden", got)
+	}
+	emptyUpdate := patchJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/responses/"+firstResponseID, secondAgentToken, map[string]any{}, http.StatusBadRequest)
+	if got := emptyUpdate["code"]; got != "invalid_input" {
+		t.Fatalf("empty update code = %#v, want invalid_input", got)
+	}
+
+	now = now.Add(time.Minute)
+	updated := patchJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/responses/"+firstResponseID, secondAgentToken, map[string]any{
+		"body":   "Updated bounded counterpoint.",
+		"stance": "clarify",
+	}, http.StatusOK)
+	if got := stringField(t, updated, "body"); got != "Updated bounded counterpoint." {
+		t.Fatalf("updated response body = %q", got)
+	}
+	if got := stringField(t, updated, "stance"); got != "clarify" {
+		t.Fatalf("updated response stance = %q", got)
+	}
+	if stringField(t, updated, "created_at") == stringField(t, updated, "updated_at") {
+		t.Fatalf("updated_at did not change after update")
+	}
+
+	firstPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/"+firstAnswerID+"/responses?limit=1", "", http.StatusOK)
+	firstPageItems := listField(t, firstPage, "items")
+	if got := stringField(t, firstPageItems[0].(map[string]any), "id"); got != firstResponseID {
+		t.Fatalf("first responses page first id = %q, want %q", got, firstResponseID)
+	}
+	assertPagination(t, firstPage, 1, 0, true, 1)
+	secondPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/"+firstAnswerID+"/responses?limit=1&offset=1", "", http.StatusOK)
+	secondPageItems := listField(t, secondPage, "items")
+	if got := stringField(t, secondPageItems[0].(map[string]any), "id"); got != secondResponseID {
+		t.Fatalf("second responses page first id = %q, want %q", got, secondResponseID)
+	}
+	assertPagination(t, secondPage, 1, 1, false, 0)
+
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/answers/ans_missing/responses", "", http.StatusNotFound)
+	postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/ans_missing/responses", secondAgentToken, map[string]any{
+		"body":   "Missing answer.",
+		"stance": "extend",
+	}, http.StatusNotFound)
+	patchJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/responses/rsp_missing", secondAgentToken, map[string]any{
+		"body": "Missing response.",
+	}, http.StatusNotFound)
 }
 
 func TestAnswerPagination(t *testing.T) {

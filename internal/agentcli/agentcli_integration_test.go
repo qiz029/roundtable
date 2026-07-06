@@ -347,15 +347,139 @@ func TestFeedListUsesAgentFeed(t *testing.T) {
 	}
 }
 
+func TestResponsesCommandsSubmitListAndUpdate(t *testing.T) {
+	t.Parallel()
+
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	askerClient := newHTTPClient(t)
+	registerVerifiedUserWithEmail(t, askerClient, server.URL, mailer, "cli-response-asker@example.com", "CLI Response Asker")
+	loginUserWithEmail(t, askerClient, server.URL, "cli-response-asker@example.com")
+	questionID := createQuestion(t, askerClient, server.URL)
+
+	answerOwnerClient := newHTTPClient(t)
+	registerVerifiedUserWithEmail(t, answerOwnerClient, server.URL, mailer, "cli-answer-owner@example.com", "CLI Answer Owner")
+	loginUserWithEmail(t, answerOwnerClient, server.URL, "cli-answer-owner@example.com")
+	answerAgentToken := createAgentWithName(t, answerOwnerClient, server.URL, "CLI Answer Agent")
+	answer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", answerAgentToken, map[string]any{
+		"body": "Answer responses should be bounded manual annotations.",
+	}, http.StatusCreated)
+	answerID := stringField(t, answer, "id")
+
+	responseOwnerClient := newHTTPClient(t)
+	registerVerifiedUserWithEmail(t, responseOwnerClient, server.URL, mailer, "cli-response-owner@example.com", "CLI Response Owner")
+	loginUserWithEmail(t, responseOwnerClient, server.URL, "cli-response-owner@example.com")
+	responseAgentToken := createAgentWithName(t, responseOwnerClient, server.URL, "CLI Response Agent")
+
+	var stdout bytes.Buffer
+	opts := agentcli.Options{
+		HomeDir: t.TempDir(),
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	}
+	if err := agentcli.Run(context.Background(), []string{
+		"login",
+		"--api-url", server.URL,
+		"--token", responseAgentToken,
+	}, opts); err != nil {
+		t.Fatalf("agent login: %v", err)
+	}
+
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{
+		"responses",
+		"submit",
+		"--answer", answerID,
+		"--stance", "disagree",
+		"--body", "  This should not create another agent task.  ",
+	}, opts); err != nil {
+		t.Fatalf("responses submit: %v", err)
+	}
+	var submitted map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &submitted); err != nil {
+		t.Fatalf("decode submitted response: %v", err)
+	}
+	responseID := stringField(t, submitted, "id")
+	if got := stringField(t, submitted, "body"); got != "This should not create another agent task." {
+		t.Fatalf("submitted response body = %q", got)
+	}
+	if got := stringField(t, submitted, "stance"); got != "disagree" {
+		t.Fatalf("submitted response stance = %q", got)
+	}
+
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{
+		"responses",
+		"list",
+		"--answer", answerID,
+	}, opts); err != nil {
+		t.Fatalf("responses list: %v", err)
+	}
+	var listed map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &listed); err != nil {
+		t.Fatalf("decode response list: %v", err)
+	}
+	items := listField(t, listed, "items")
+	if len(items) != 1 {
+		t.Fatalf("response list count = %d, want 1", len(items))
+	}
+	if got := stringField(t, items[0].(map[string]any), "id"); got != responseID {
+		t.Fatalf("listed response id = %q, want %q", got, responseID)
+	}
+
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{
+		"responses",
+		"update",
+		responseID,
+		"--stance", "clarify",
+		"--body", "Updated bounded response.",
+	}, opts); err != nil {
+		t.Fatalf("responses update: %v", err)
+	}
+	var updated map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &updated); err != nil {
+		t.Fatalf("decode updated response: %v", err)
+	}
+	if got := stringField(t, updated, "body"); got != "Updated bounded response." {
+		t.Fatalf("updated response body = %q", got)
+	}
+	if got := stringField(t, updated, "stance"); got != "clarify" {
+		t.Fatalf("updated response stance = %q", got)
+	}
+}
+
 func registerVerifiedUser(t *testing.T, client *http.Client, apiURL string, mailer *roundtable.MemoryMailer) {
 	t.Helper()
 
+	registerVerifiedUserWithEmail(t, client, apiURL, mailer, "owner@example.com", "Owner")
+}
+
+func registerVerifiedUserWithEmail(t *testing.T, client *http.Client, apiURL string, mailer *roundtable.MemoryMailer, email string, displayName string) {
+	t.Helper()
+
 	postJSON(t, client, apiURL+"/api/v1/auth/register", "", map[string]any{
-		"email":        "owner@example.com",
+		"email":        email,
 		"password":     testPassword,
-		"display_name": "Owner",
+		"display_name": displayName,
 	}, http.StatusCreated)
-	token, ok := mailer.VerificationToken("owner@example.com")
+	token, ok := mailer.VerificationToken(email)
 	if !ok {
 		t.Fatalf("verification token was not sent")
 	}
@@ -365,8 +489,14 @@ func registerVerifiedUser(t *testing.T, client *http.Client, apiURL string, mail
 func loginUser(t *testing.T, client *http.Client, apiURL string) {
 	t.Helper()
 
+	loginUserWithEmail(t, client, apiURL, "owner@example.com")
+}
+
+func loginUserWithEmail(t *testing.T, client *http.Client, apiURL string, email string) {
+	t.Helper()
+
 	postJSON(t, client, apiURL+"/api/v1/auth/login", "", map[string]any{
-		"email":    "owner@example.com",
+		"email":    email,
 		"password": testPassword,
 	}, http.StatusOK)
 }
@@ -374,8 +504,14 @@ func loginUser(t *testing.T, client *http.Client, apiURL string) {
 func createAgent(t *testing.T, client *http.Client, apiURL string) string {
 	t.Helper()
 
+	return createAgentWithName(t, client, apiURL, "External Agent")
+}
+
+func createAgentWithName(t *testing.T, client *http.Client, apiURL string, name string) string {
+	t.Helper()
+
 	resp := postJSON(t, client, apiURL+"/api/v1/me/agents", "", map[string]any{
-		"name":         "External Agent",
+		"name":         name,
 		"description":  "Answers through the agent CLI.",
 		"tags":         []string{"cli"},
 		"capabilities": []string{"answering"},
