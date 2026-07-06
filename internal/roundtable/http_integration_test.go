@@ -1080,6 +1080,189 @@ func TestAgentAvatarUploadDeleteAndEmbeddedSurfaces(t *testing.T) {
 	}
 }
 
+func TestPublicAgentDetailAndAnswers(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+	store, err := roundtable.NewLocalAvatarStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new avatar store: %v", err)
+	}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:      mailer,
+		AvatarStore: store,
+		Now: func() time.Time {
+			return now
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	ownerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, ownerClient, server.URL, mailer, "public-agent-owner@example.com", "Public Agent Owner")
+	agentResp := postJSON(t, ownerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Public Explainer",
+		"description":  "Explains public answers.",
+		"tags":         []string{"analysis", "public"},
+		"capabilities": []string{"explain", "summarize"},
+		"instructions": "Private operating instructions.",
+		"homepage_url": "https://example.com/public-explainer",
+		"is_public":    true,
+	}, http.StatusCreated)
+	agentID := stringField(t, agentResp, "id")
+	agentToken := stringField(t, agentResp, "token")
+	uploaded := postAvatar(t, ownerClient, server.URL+"/api/v1/me/agents/"+agentID+"/avatar", "", testPNG(t, 24, 24), "public-agent.png", http.StatusOK)
+	avatarURL := stringField(t, uploaded, "avatar_url")
+
+	detail := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/"+agentID, "", http.StatusOK)
+	if got := stringField(t, detail, "id"); got != agentID {
+		t.Fatalf("public detail id = %q, want %q", got, agentID)
+	}
+	if got := stringField(t, detail, "description"); got != "Explains public answers." {
+		t.Fatalf("public detail description = %q", got)
+	}
+	if got := stringField(t, detail, "avatar_url"); got != avatarURL {
+		t.Fatalf("public detail avatar_url = %q, want %q", got, avatarURL)
+	}
+	if got := stringField(t, detail, "owner_name"); got != "Public Agent Owner" {
+		t.Fatalf("public detail owner_name = %q", got)
+	}
+	if got := stringField(t, detail, "homepage_url"); got != "https://example.com/public-explainer" {
+		t.Fatalf("public detail homepage_url = %q", got)
+	}
+	if got := boolField(t, detail, "is_public"); !got {
+		t.Fatal("public detail is_public = false, want true")
+	}
+	if got := stringField(t, detail, "status"); got != "active" {
+		t.Fatalf("public detail status = %q, want active", got)
+	}
+	if got := intField(t, detail, "answer_count"); got != 0 {
+		t.Fatalf("public detail answer_count = %d, want 0", got)
+	}
+	if _, ok := detail["instructions"]; ok {
+		t.Fatalf("public detail leaked instructions: %#v", detail["instructions"])
+	}
+	if _, ok := detail["token"]; ok {
+		t.Fatalf("public detail leaked token: %#v", detail["token"])
+	}
+	if got := len(listField(t, detail, "tags")); got != 2 {
+		t.Fatalf("public detail tags count = %d, want 2", got)
+	}
+	if got := len(listField(t, detail, "capabilities")); got != 2 {
+		t.Fatalf("public detail capabilities count = %d, want 2", got)
+	}
+
+	privateResp := postJSON(t, ownerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Private Explainer",
+		"description":  "Should not be public.",
+		"instructions": "Private instructions.",
+		"is_public":    false,
+		"status":       "paused",
+	}, http.StatusCreated)
+	privateAgentID := stringField(t, privateResp, "id")
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/"+privateAgentID, "", http.StatusNotFound)
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/"+privateAgentID+"/answers", "", http.StatusNotFound)
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/agt_missing", "", http.StatusNotFound)
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/agt_missing/answers", "", http.StatusNotFound)
+
+	now = now.Add(time.Minute)
+	firstQuestion := postJSON(t, ownerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "First public agent answer?",
+		"body":  "This question should appear second in newest-first answer order.",
+		"tags":  []string{"analysis"},
+	}, http.StatusCreated)
+	firstQuestionID := stringField(t, firstQuestion, "id")
+	now = now.Add(time.Minute)
+	firstAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+firstQuestionID+"/answers", agentToken, map[string]any{
+		"body": "Older public answer.",
+	}, http.StatusCreated)
+	firstAnswerID := stringField(t, firstAnswer, "id")
+
+	now = now.Add(time.Minute)
+	secondQuestion := postJSON(t, ownerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Second public agent answer?",
+		"body":  "This question should appear first in newest-first answer order.",
+		"tags":  []string{"public"},
+	}, http.StatusCreated)
+	secondQuestionID := stringField(t, secondQuestion, "id")
+	now = now.Add(time.Minute)
+	secondAnswer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+secondQuestionID+"/answers", agentToken, map[string]any{
+		"body": "Newer public answer.",
+	}, http.StatusCreated)
+	secondAnswerID := stringField(t, secondAnswer, "id")
+
+	detail = getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/"+agentID, "", http.StatusOK)
+	if got := intField(t, detail, "answer_count"); got != 2 {
+		t.Fatalf("public detail answer_count = %d, want 2", got)
+	}
+
+	firstPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/"+agentID+"/answers?limit=1", "", http.StatusOK)
+	assertPagination(t, firstPage, 1, 0, true, 1)
+	firstItems := listField(t, firstPage, "items")
+	if len(firstItems) != 1 {
+		t.Fatalf("first page item count = %d, want 1", len(firstItems))
+	}
+	firstItem := firstItems[0].(map[string]any)
+	firstPageQuestion := mapField(t, firstItem, "question")
+	if got := stringField(t, firstPageQuestion, "id"); got != secondQuestionID {
+		t.Fatalf("newest question id = %q, want %q", got, secondQuestionID)
+	}
+	if got := stringField(t, firstPageQuestion, "title"); got != "Second public agent answer?" {
+		t.Fatalf("newest question title = %q", got)
+	}
+	if got := intField(t, firstPageQuestion, "answer_count"); got != 1 {
+		t.Fatalf("newest question answer_count = %d, want 1", got)
+	}
+	firstPageAnswer := mapField(t, firstItem, "answer")
+	if got := stringField(t, firstPageAnswer, "id"); got != secondAnswerID {
+		t.Fatalf("newest answer id = %q, want %q", got, secondAnswerID)
+	}
+	if got := stringField(t, firstPageAnswer, "body"); got != "Newer public answer." {
+		t.Fatalf("newest answer body = %q", got)
+	}
+	if got := stringField(t, firstPageAnswer, "created_at"); got == "" {
+		t.Fatal("newest answer created_at is empty")
+	}
+	if got := intField(t, firstPageAnswer, "like_count"); got != 0 {
+		t.Fatalf("newest answer like_count = %d, want 0", got)
+	}
+	if got := intField(t, firstPageAnswer, "comment_count"); got != 0 {
+		t.Fatalf("newest answer comment_count = %d, want 0", got)
+	}
+	answerAgent := mapField(t, firstPageAnswer, "agent")
+	if got := stringField(t, answerAgent, "id"); got != agentID {
+		t.Fatalf("answer agent id = %q, want %q", got, agentID)
+	}
+	if got := stringField(t, answerAgent, "avatar_url"); got != avatarURL {
+		t.Fatalf("answer agent avatar_url = %q, want %q", got, avatarURL)
+	}
+	if got := stringField(t, answerAgent, "owner_name"); got != "Public Agent Owner" {
+		t.Fatalf("answer agent owner_name = %q", got)
+	}
+
+	secondPage := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agents/"+agentID+"/answers?limit=1&offset=1", "", http.StatusOK)
+	assertPagination(t, secondPage, 1, 1, false, 0)
+	secondItems := listField(t, secondPage, "items")
+	if len(secondItems) != 1 {
+		t.Fatalf("second page item count = %d, want 1", len(secondItems))
+	}
+	secondPageAnswer := mapField(t, secondItems[0].(map[string]any), "answer")
+	if got := stringField(t, secondPageAnswer, "id"); got != firstAnswerID {
+		t.Fatalf("older answer id = %q, want %q", got, firstAnswerID)
+	}
+	if got := stringField(t, secondPageAnswer, "body"); got != "Older public answer." {
+		t.Fatalf("older answer body = %q", got)
+	}
+}
+
 func TestAgentSelfProfilePatchAndAvatarUpload(t *testing.T) {
 	t.Parallel()
 

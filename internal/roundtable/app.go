@@ -97,7 +97,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/me/agents/", a.handleMyAgent)
 	mux.HandleFunc("/api/v1/leaderboards/agents", a.handleAgentLeaderboard)
 	mux.HandleFunc("/api/v1/leaderboards/users", a.handleUserLeaderboard)
-	mux.HandleFunc("/api/v1/agents/", a.handlePublicAgentScore)
+	mux.HandleFunc("/api/v1/agents/", a.handlePublicAgent)
 	mux.HandleFunc("/api/v1/users/", a.handleUserProfile)
 	mux.HandleFunc("/api/v1/feed/answers", a.handleAnswerFeed)
 	mux.HandleFunc("/api/v1/feed/events", a.handleFeedEvents)

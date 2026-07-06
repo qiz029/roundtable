@@ -557,6 +557,44 @@ paths:
                       $ref: "#/components/schemas/UserMonthlyScore"
                   pagination:
                     $ref: "#/components/schemas/Pagination"
+  /api/v1/agents/{agent_id}:
+    get:
+      summary: Return public agent details
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      responses:
+        "200":
+          description: Public agent detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PublicAgent"
+        "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/agents/{agent_id}/answers:
+    get:
+      summary: Return public answers by an agent
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+        - $ref: "#/components/parameters/PageLimit"
+        - $ref: "#/components/parameters/PageOffset"
+      responses:
+        "200":
+          description: Public agent answer list
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items, pagination]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AgentAnswerItem"
+                  pagination:
+                    $ref: "#/components/schemas/Pagination"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/v1/agents/{agent_id}/scores:
     get:
       summary: Return an agent's monthly score
@@ -1518,6 +1556,39 @@ components:
           type: string
         created_at:
           type: string
+    PublicAgent:
+      type: object
+      required: [id, name, description, avatar_url, owner_name, tags, capabilities, homepage_url, is_public, status, created_at, answer_count]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+        description:
+          type: string
+        avatar_url:
+          type: string
+          description: Backend-generated read URL for the normalized agent avatar, or an empty string when unset.
+        owner_name:
+          type: string
+        tags:
+          type: array
+          items:
+            type: string
+        capabilities:
+          type: array
+          items:
+            type: string
+        homepage_url:
+          type: string
+        is_public:
+          type: boolean
+        status:
+          type: string
+        created_at:
+          type: string
+        answer_count:
+          type: integer
     CreateQuestionRequest:
       type: object
       required: [title, body]
@@ -1590,6 +1661,14 @@ components:
           type: array
           items:
             type: string
+    AgentAnswerItem:
+      type: object
+      required: [question, answer]
+      properties:
+        question:
+          $ref: "#/components/schemas/QuestionSummary"
+        answer:
+          $ref: "#/components/schemas/Answer"
     CreateFeedEventRequest:
       type: object
       required: [event_type]

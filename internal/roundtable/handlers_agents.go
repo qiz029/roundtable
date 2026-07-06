@@ -230,6 +230,53 @@ type ownedAgentProfile struct {
 	CreatedAt         string
 }
 
+type publicAgentProfile struct {
+	ID              string
+	Name            string
+	Description     string
+	AvatarObjectKey string
+	OwnerName       string
+	TagsRaw         string
+	CapabilitiesRaw string
+	HomepageURL     string
+	IsPublic        bool
+	Status          string
+	CreatedAt       string
+	AnswerCount     int
+}
+
+func (a *App) handlePublicAgent(w http.ResponseWriter, r *http.Request) {
+	tail := pathTail(r.URL.Path, "/api/v1/agents/")
+	if tail == "" {
+		writeError(w, errNotFound("agent action not found"))
+		return
+	}
+	parts := strings.Split(tail, "/")
+	if len(parts) == 1 && parts[0] != "" {
+		if r.Method != http.MethodGet {
+			writeError(w, errMethodNotAllowed())
+			return
+		}
+		a.getPublicAgent(w, r, parts[0])
+		return
+	}
+	if len(parts) == 2 && parts[0] != "" {
+		switch parts[1] {
+		case "answers":
+			if r.Method != http.MethodGet {
+				writeError(w, errMethodNotAllowed())
+				return
+			}
+			a.listPublicAgentAnswers(w, r, parts[0])
+			return
+		case "scores":
+			a.handlePublicAgentScore(w, r, parts[0])
+			return
+		}
+	}
+	writeError(w, errNotFound("agent action not found"))
+}
+
 func (a *App) getMyAgent(w http.ResponseWriter, r *http.Request, user currentUser, agentID string) {
 	profile, err := a.ownedAgentProfile(r.Context(), user.ID, agentID)
 	if err != nil {
@@ -360,6 +407,30 @@ func (a *App) ownedAgentProfile(ctx context.Context, ownerUserID string, agentID
 	return profile, err
 }
 
+func (a *App) publicAgentProfile(ctx context.Context, agentID string) (publicAgentProfile, error) {
+	var profile publicAgentProfile
+	err := a.db.QueryRowContext(ctx, `
+		SELECT ag.id, ag.name, ag.description, ag.avatar_object_key, owner.display_name,
+			ag.tags_json, ag.capabilities_json, ag.homepage_url, ag.is_public, ag.status, ag.created_at,
+			(
+				SELECT COUNT(*)
+				FROM answers ans
+				JOIN questions q ON q.id = ans.question_id
+				JOIN users question_author ON question_author.id = q.author_user_id
+				WHERE ans.agent_id = ag.id
+					AND question_author.status = 'active'
+			) AS answer_count
+		FROM agents ag
+		JOIN users owner ON owner.id = ag.owner_user_id
+		WHERE ag.id = $1
+			AND ag.is_public = TRUE
+			AND owner.status = 'active'
+	`, agentID).Scan(&profile.ID, &profile.Name, &profile.Description, &profile.AvatarObjectKey,
+		&profile.OwnerName, &profile.TagsRaw, &profile.CapabilitiesRaw, &profile.HomepageURL,
+		&profile.IsPublic, &profile.Status, &profile.CreatedAt, &profile.AnswerCount)
+	return profile, err
+}
+
 func (a *App) agentProfileResponse(profile ownedAgentProfile) map[string]any {
 	return map[string]any{
 		"id":           profile.ID,
@@ -374,6 +445,128 @@ func (a *App) agentProfileResponse(profile ownedAgentProfile) map[string]any {
 		"status":       profile.Status,
 		"created_at":   profile.CreatedAt,
 	}
+}
+
+func (a *App) publicAgentProfileResponse(profile publicAgentProfile) map[string]any {
+	return map[string]any{
+		"id":           profile.ID,
+		"name":         profile.Name,
+		"description":  profile.Description,
+		"avatar_url":   a.avatarURL(profile.AvatarObjectKey),
+		"owner_name":   profile.OwnerName,
+		"tags":         decodeStringList(profile.TagsRaw),
+		"capabilities": decodeStringList(profile.CapabilitiesRaw),
+		"homepage_url": profile.HomepageURL,
+		"is_public":    profile.IsPublic,
+		"status":       profile.Status,
+		"created_at":   profile.CreatedAt,
+		"answer_count": profile.AnswerCount,
+	}
+}
+
+func (a *App) getPublicAgent(w http.ResponseWriter, r *http.Request, agentID string) {
+	profile, err := a.publicAgentProfile(r.Context(), agentID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, errNotFound("agent not found"))
+			return
+		}
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, a.publicAgentProfileResponse(profile))
+}
+
+func (a *App) listPublicAgentAnswers(w http.ResponseWriter, r *http.Request, agentID string) {
+	if _, err := a.publicAgentProfile(r.Context(), agentID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			writeError(w, errNotFound("agent not found"))
+			return
+		}
+		writeError(w, err)
+		return
+	}
+	page, err := paginationFromRequest(r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	items, hasMore, err := a.publicAgentAnswers(r.Context(), agentID, page)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"items":      items,
+		"pagination": paginationResponse(page, len(items), hasMore),
+	})
+}
+
+func (a *App) publicAgentAnswers(ctx context.Context, agentID string, page paginationParams) ([]map[string]any, bool, error) {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT q.id, q.title, q.body, q.tags_json, q.created_at, question_author.display_name,
+			(SELECT COUNT(*) FROM answers qans WHERE qans.question_id = q.id) AS answer_count,
+			ans.id, ans.body, ans.created_at,
+			COALESCE(SUM(v.value), 0) AS like_count,
+			(SELECT COUNT(*) FROM answer_comments c WHERE c.answer_id = ans.id AND c.deleted_at IS NULL) AS comment_count,
+			ag.id, ag.name, ag.avatar_object_key, owner.display_name
+		FROM answers ans
+		JOIN questions q ON q.id = ans.question_id
+		JOIN users question_author ON question_author.id = q.author_user_id
+		JOIN agents ag ON ag.id = ans.agent_id
+		JOIN users owner ON owner.id = ag.owner_user_id
+		LEFT JOIN votes v ON v.answer_id = ans.id AND v.revoked_at IS NULL
+		WHERE ag.id = $1
+			AND ag.is_public = TRUE
+			AND question_author.status = 'active'
+			AND owner.status = 'active'
+		GROUP BY q.id, q.title, q.body, q.tags_json, q.created_at, question_author.display_name,
+			ans.id, ans.body, ans.created_at, ag.id, ag.name, ag.avatar_object_key, owner.display_name
+		ORDER BY ans.created_at DESC, ans.id ASC
+		LIMIT $2 OFFSET $3
+	`, agentID, page.Limit+1, page.Offset)
+	if err != nil {
+		return nil, false, err
+	}
+	defer rows.Close()
+
+	items := []map[string]any{}
+	for rows.Next() {
+		var questionID, questionTitle, questionBody, questionTagsRaw, questionCreatedAt, questionAuthorName string
+		var questionAnswerCount int
+		var answerID, answerBody, answerCreatedAt string
+		var likeCount, commentCount int
+		var answerAgentID, answerAgentName, answerAgentAvatarObjectKey, answerAgentOwnerName string
+		if err := rows.Scan(&questionID, &questionTitle, &questionBody, &questionTagsRaw, &questionCreatedAt, &questionAuthorName,
+			&questionAnswerCount, &answerID, &answerBody, &answerCreatedAt, &likeCount, &commentCount,
+			&answerAgentID, &answerAgentName, &answerAgentAvatarObjectKey, &answerAgentOwnerName); err != nil {
+			return nil, false, err
+		}
+		items = append(items, map[string]any{
+			"question": map[string]any{
+				"id":           questionID,
+				"title":        questionTitle,
+				"body":         questionBody,
+				"tags":         decodeStringList(questionTagsRaw),
+				"created_at":   questionCreatedAt,
+				"author_name":  questionAuthorName,
+				"answer_count": questionAnswerCount,
+			},
+			"answer": map[string]any{
+				"id":            answerID,
+				"body":          answerBody,
+				"created_at":    answerCreatedAt,
+				"like_count":    likeCount,
+				"comment_count": commentCount,
+				"agent":         a.agentIdentityResponse(answerAgentID, answerAgentName, answerAgentOwnerName, answerAgentAvatarObjectKey),
+			},
+		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, err
+	}
+	items, hasMore := trimPaginatedItems(items, page)
+	return items, hasMore, nil
 }
 
 func validAgentStatus(status string) bool {

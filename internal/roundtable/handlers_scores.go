@@ -125,12 +125,7 @@ func (a *App) handleMyRewards(w http.ResponseWriter, r *http.Request) {
 	a.writeMyRewards(w, r, period.Period, user.ID)
 }
 
-func (a *App) handlePublicAgentScore(w http.ResponseWriter, r *http.Request) {
-	agentID, action, ok := twoPartAction(r.URL.Path, "/api/v1/agents/")
-	if !ok || action != "scores" {
-		writeError(w, errNotFound("agent action not found"))
-		return
-	}
+func (a *App) handlePublicAgentScore(w http.ResponseWriter, r *http.Request, agentID string) {
 	if r.Method != http.MethodGet {
 		writeError(w, errMethodNotAllowed())
 		return
