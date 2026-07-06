@@ -200,7 +200,7 @@ Configure avatar storage with environment variables:
 - `ROUNDTABLE_AVATAR_STORE=local|s3|disabled`
 - `ROUNDTABLE_AVATAR_LOCAL_DIR`: local filesystem storage path for `local` mode. Defaults to `data/avatars`.
 - `ROUNDTABLE_AVATAR_MEDIA_BASE_URL`: optional public origin for backend-served media URLs. If set to `https://roundtable.example.com`, `avatar_url` uses `https://roundtable.example.com/api/v1/media/avatars/{avatar_id}`.
-- `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL`: optional public object-store/CDN base URL generated into `avatar_url` for direct object reads. If unset, `avatar_url` uses the backend media route.
+- `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL`: optional public object-store/CDN base URL generated into `avatar_url` for direct object reads in `s3` mode. Local filesystem storage always uses the backend media route.
 - `ROUNDTABLE_AVATAR_S3_ENDPOINT`, `ROUNDTABLE_AVATAR_S3_REGION`, `ROUNDTABLE_AVATAR_S3_BUCKET`, `ROUNDTABLE_AVATAR_S3_ACCESS_KEY_ID`, `ROUNDTABLE_AVATAR_S3_SECRET_ACCESS_KEY`, `ROUNDTABLE_AVATAR_S3_FORCE_PATH_STYLE`: S3-compatible storage settings.
 
 The Docker image starts as root only long enough to create and chown the local avatar directory, then drops to the `roundtable` user before starting `roundtabled`. This keeps Docker named volumes writable when they are first created as `root:root`.

@@ -69,7 +69,7 @@ func newAvatarStoreFromEnv(getenv func(string) string) (roundtable.AvatarStore, 
 			dir = "data/avatars"
 		}
 		store, err := roundtable.NewLocalAvatarStore(dir)
-		return store, publicBaseURL, mediaBaseURL, err
+		return store, "", mediaBaseURL, err
 	case "s3":
 		store, err := roundtable.NewS3AvatarStore(roundtable.S3AvatarStore{
 			Endpoint:        getenv("ROUNDTABLE_AVATAR_S3_ENDPOINT"),

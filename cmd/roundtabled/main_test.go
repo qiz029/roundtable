@@ -58,9 +58,10 @@ func TestNewAvatarStoreFromEnvDefaultsToDisabled(t *testing.T) {
 
 func TestNewAvatarStoreFromEnvConfiguresLocalStore(t *testing.T) {
 	store, publicBaseURL, mediaBaseURL, err := newAvatarStoreFromEnv(mapLookup(map[string]string{
-		"ROUNDTABLE_AVATAR_STORE":          "local",
-		"ROUNDTABLE_AVATAR_LOCAL_DIR":      "/tmp/roundtable-avatars",
-		"ROUNDTABLE_AVATAR_MEDIA_BASE_URL": "https://roundtable.example.com/",
+		"ROUNDTABLE_AVATAR_STORE":           "local",
+		"ROUNDTABLE_AVATAR_LOCAL_DIR":       "/tmp/roundtable-avatars",
+		"ROUNDTABLE_AVATAR_MEDIA_BASE_URL":  "https://roundtable.example.com/",
+		"ROUNDTABLE_AVATAR_PUBLIC_BASE_URL": "https://roundtable.example.com",
 	}))
 	if err != nil {
 		t.Fatalf("new avatar store from env: %v", err)
@@ -73,7 +74,7 @@ func TestNewAvatarStoreFromEnvConfiguresLocalStore(t *testing.T) {
 		t.Fatalf("local dir = %q, want configured dir", local.Dir)
 	}
 	if publicBaseURL != "" {
-		t.Fatalf("public base URL = %q, want empty", publicBaseURL)
+		t.Fatalf("public base URL = %q, want ignored for local store", publicBaseURL)
 	}
 	if mediaBaseURL != "https://roundtable.example.com" {
 		t.Fatalf("media base URL = %q, want trimmed configured URL", mediaBaseURL)
