@@ -4,9 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"image"
+	"image/color"
+	"image/png"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -169,6 +173,106 @@ func TestProfileShowPrintsCurrentAgentProfile(t *testing.T) {
 	}
 	if got := len(listField(t, profile, "capabilities")); got != 1 {
 		t.Fatalf("profile capabilities count = %d, want 1", got)
+	}
+}
+
+func TestProfileSetAndAvatarCommandsUpdateCurrentAgent(t *testing.T) {
+	t.Parallel()
+
+	store, err := roundtable.NewLocalAvatarStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new avatar store: %v", err)
+	}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:      mailer,
+		AvatarStore: store,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerVerifiedUser(t, userClient, server.URL, mailer)
+	loginUser(t, userClient, server.URL)
+	agentToken := createAgent(t, userClient, server.URL)
+
+	var stdout bytes.Buffer
+	opts := agentcli.Options{
+		HomeDir: t.TempDir(),
+		Stdout:  &stdout,
+		Stderr:  &bytes.Buffer{},
+	}
+	if err := agentcli.Run(context.Background(), []string{
+		"login",
+		"--api-url", server.URL,
+		"--token", agentToken,
+	}, opts); err != nil {
+		t.Fatalf("agent login: %v", err)
+	}
+
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{
+		"profile",
+		"set",
+		"--name", "CLI Managed Agent",
+		"--description", "Updated by the agent CLI.",
+		"--homepage-url", "https://example.com/cli-agent",
+	}, opts); err != nil {
+		t.Fatalf("profile set: %v", err)
+	}
+	var profile map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &profile); err != nil {
+		t.Fatalf("decode profile set: %v", err)
+	}
+	if got := stringField(t, profile, "name"); got != "CLI Managed Agent" {
+		t.Fatalf("profile set name = %q, want CLI Managed Agent", got)
+	}
+	if got := stringField(t, profile, "description"); got != "Updated by the agent CLI." {
+		t.Fatalf("profile set description = %q", got)
+	}
+	if got := stringField(t, profile, "homepage_url"); got != "https://example.com/cli-agent" {
+		t.Fatalf("profile set homepage_url = %q", got)
+	}
+
+	avatarPath := writeTestAvatarPNG(t)
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{
+		"avatar",
+		"upload",
+		"--file", avatarPath,
+	}, opts); err != nil {
+		t.Fatalf("avatar upload: %v", err)
+	}
+	var uploaded map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &uploaded); err != nil {
+		t.Fatalf("decode avatar upload: %v", err)
+	}
+	avatarURL := stringField(t, uploaded, "avatar_url")
+	if !strings.HasPrefix(avatarURL, "/api/v1/media/avatars/") {
+		t.Fatalf("avatar_url = %q, want backend media route", avatarURL)
+	}
+
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{"avatar", "delete"}, opts); err != nil {
+		t.Fatalf("avatar delete: %v", err)
+	}
+	var deleted map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &deleted); err != nil {
+		t.Fatalf("decode avatar delete: %v", err)
+	}
+	if got := stringFieldAllowEmpty(t, deleted, "avatar_url"); got != "" {
+		t.Fatalf("deleted avatar_url = %q, want empty", got)
 	}
 }
 
@@ -611,12 +715,42 @@ func getJSON(t *testing.T, client *http.Client, url string, bearerToken string, 
 	return decoded
 }
 
+func writeTestAvatarPNG(t *testing.T) string {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, 12, 10))
+	for y := 0; y < 10; y++ {
+		for x := 0; x < 12; x++ {
+			img.Set(x, y, color.RGBA{R: 80, G: 130, B: 210, A: 255})
+		}
+	}
+	file, err := os.CreateTemp(t.TempDir(), "avatar-*.png")
+	if err != nil {
+		t.Fatalf("create avatar file: %v", err)
+	}
+	defer file.Close()
+	if err := png.Encode(file, img); err != nil {
+		t.Fatalf("encode avatar png: %v", err)
+	}
+	return file.Name()
+}
+
 func stringField(t *testing.T, values map[string]any, name string) string {
 	t.Helper()
 
 	value, ok := values[name].(string)
 	if !ok || value == "" {
 		t.Fatalf("field %q = %#v, want non-empty string", name, values[name])
+	}
+	return value
+}
+
+func stringFieldAllowEmpty(t *testing.T, values map[string]any, name string) string {
+	t.Helper()
+
+	value, ok := values[name].(string)
+	if !ok {
+		t.Fatalf("field %q = %#v, want string", name, values[name])
 	}
 	return value
 }

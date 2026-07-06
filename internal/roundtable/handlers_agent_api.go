@@ -3,6 +3,7 @@ package roundtable
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -10,10 +11,17 @@ import (
 )
 
 func (a *App) handleAgentProfile(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodGet:
+		a.getAgentProfile(w, r)
+	case http.MethodPatch:
+		a.updateAgentSelfProfile(w, r)
+	default:
 		writeError(w, errMethodNotAllowed())
-		return
 	}
+}
+
+func (a *App) getAgentProfile(w http.ResponseWriter, r *http.Request) {
 	agent, err := a.requireAgent(r.Context(), r)
 	if err != nil {
 		writeError(w, err)
@@ -25,6 +33,105 @@ func (a *App) handleAgentProfile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, a.agentProfileResponse(profile))
+}
+
+func (a *App) updateAgentSelfProfile(w http.ResponseWriter, r *http.Request) {
+	agent, err := a.requireAgent(r.Context(), r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	profile, err := a.ownedAgentProfile(r.Context(), agent.OwnerID, agent.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+
+	var req struct {
+		Name         *string         `json:"name"`
+		Description  *string         `json:"description"`
+		HomepageURL  *string         `json:"homepage_url"`
+		AvatarURL    json.RawMessage `json:"avatar_url"`
+		Tags         json.RawMessage `json:"tags"`
+		Capabilities json.RawMessage `json:"capabilities"`
+		Instructions json.RawMessage `json:"instructions"`
+		IsPublic     json.RawMessage `json:"is_public"`
+		Status       json.RawMessage `json:"status"`
+	}
+	if err := decodeJSON(r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	if len(req.AvatarURL) > 0 {
+		writeError(w, errInvalidInput("avatar_url is managed by avatar upload endpoints"))
+		return
+	}
+	for _, field := range []struct {
+		name string
+		raw  json.RawMessage
+	}{
+		{name: "tags", raw: req.Tags},
+		{name: "capabilities", raw: req.Capabilities},
+		{name: "instructions", raw: req.Instructions},
+		{name: "is_public", raw: req.IsPublic},
+		{name: "status", raw: req.Status},
+	} {
+		if len(field.raw) > 0 {
+			writeError(w, errInvalidInput(field.name+" is owner-managed"))
+			return
+		}
+	}
+
+	changed := false
+	if req.Name != nil {
+		name := strings.TrimSpace(*req.Name)
+		if name == "" {
+			writeError(w, errInvalidInput("name cannot be blank"))
+			return
+		}
+		profile.Name = name
+		changed = true
+	}
+	if req.Description != nil {
+		profile.Description = strings.TrimSpace(*req.Description)
+		changed = true
+	}
+	if req.HomepageURL != nil {
+		profile.HomepageURL = strings.TrimSpace(*req.HomepageURL)
+		changed = true
+	}
+	if !changed {
+		writeError(w, errInvalidInput("name, description, or homepage_url is required"))
+		return
+	}
+
+	if _, err := a.db.ExecContext(r.Context(), `
+		UPDATE agents
+		SET name = $1,
+			description = $2,
+			homepage_url = $3
+		WHERE id = $4 AND owner_user_id = $5
+	`, profile.Name, profile.Description, profile.HomepageURL, profile.ID, agent.OwnerID); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, a.agentProfileResponse(profile))
+}
+
+func (a *App) handleAgentAvatar(w http.ResponseWriter, r *http.Request) {
+	agent, err := a.requireAgent(r.Context(), r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	switch r.Method {
+	case http.MethodPost:
+		a.uploadAgentAvatar(w, r, currentUser{ID: agent.OwnerID}, agent.ID)
+	case http.MethodDelete:
+		a.deleteAgentAvatar(w, r, currentUser{ID: agent.OwnerID}, agent.ID)
+	default:
+		writeError(w, errMethodNotAllowed())
+	}
 }
 
 func (a *App) handleAgentInvitations(w http.ResponseWriter, r *http.Request) {

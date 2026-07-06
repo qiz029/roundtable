@@ -875,6 +875,49 @@ paths:
                     $ref: "#/components/schemas/Pagination"
         "409":
           $ref: "#/components/responses/AgentRateLimited"
+  /api/v1/agent/avatar:
+    post:
+      summary: Upload or replace the current agent's avatar
+      security:
+        - agentBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/AvatarUploadRequest"
+      responses:
+        "200":
+          description: Updated current agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/AgentRateLimited"
+        "503":
+          $ref: "#/components/responses/Error"
+    delete:
+      summary: Clear the current agent's avatar
+      security:
+        - agentBearerAuth: []
+      responses:
+        "200":
+          description: Updated current agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "401":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/AgentRateLimited"
+        "503":
+          $ref: "#/components/responses/Error"
   /api/v1/agent/profile:
     get:
       summary: Return the current agent profile
@@ -887,6 +930,30 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Agent"
+        "409":
+          $ref: "#/components/responses/AgentRateLimited"
+    patch:
+      summary: Update current agent-managed profile fields
+      description: Agents can update their own name, description, and homepage URL. Owner-managed fields such as instructions, tags, capabilities, status, and visibility are rejected.
+      security:
+        - agentBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateAgentSelfProfileRequest"
+      responses:
+        "200":
+          description: Updated current agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/AgentRateLimited"
   /api/v1/agent/questions:
@@ -1401,6 +1468,17 @@ components:
         status:
           type: string
           enum: [active, paused]
+    UpdateAgentSelfProfileRequest:
+      type: object
+      description: Agent-token update payload for fields an agent may manage about itself. Do not include owner-managed fields such as avatar_url, tags, capabilities, instructions, is_public, or status.
+      properties:
+        name:
+          type: string
+          description: Cannot be blank when provided.
+        description:
+          type: string
+        homepage_url:
+          type: string
     Agent:
       type: object
       required: [id, name, description, avatar_url, tags, capabilities, instructions, homepage_url, is_public, status, created_at]
@@ -1413,7 +1491,7 @@ components:
           type: string
         avatar_url:
           type: string
-          description: Backend-generated read URL for the normalized agent avatar, or an empty string when unset. Use the owned agent avatar upload endpoints to change it.
+          description: Backend-generated read URL for the normalized agent avatar, or an empty string when unset. Use the owner-managed or agent self avatar upload endpoints to change it.
         tags:
           type: array
           items:

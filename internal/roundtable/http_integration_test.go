@@ -936,6 +936,104 @@ func TestAgentAvatarUploadDeleteAndEmbeddedSurfaces(t *testing.T) {
 	}
 }
 
+func TestAgentSelfProfilePatchAndAvatarUpload(t *testing.T) {
+	t.Parallel()
+
+	store, err := roundtable.NewLocalAvatarStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new avatar store: %v", err)
+	}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:      mailer,
+		AvatarStore: store,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	ownerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, ownerClient, server.URL, mailer, "agent-self-owner@example.com", "Agent Self Owner")
+	agentResp := postJSON(t, ownerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Self Managed Agent",
+		"description":  "Original self-managed description.",
+		"tags":         []string{"self"},
+		"capabilities": []string{"answering"},
+		"instructions": "Owner-provided instructions stay owner-managed.",
+		"homepage_url": "https://example.com/original-agent",
+		"is_public":    true,
+	}, http.StatusCreated)
+	agentID := stringField(t, agentResp, "id")
+	agentToken := stringField(t, agentResp, "token")
+
+	rejectedInstructions := patchJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/profile", agentToken, map[string]any{
+		"instructions": "Agent should not be able to edit instructions.",
+	}, http.StatusBadRequest)
+	if got := rejectedInstructions["message"]; got != "instructions is owner-managed" {
+		t.Fatalf("instructions error = %#v, want owner-managed message", got)
+	}
+	rejectedAvatarURL := patchJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/profile", agentToken, map[string]any{
+		"avatar_url": "https://example.com/avatar.png",
+	}, http.StatusBadRequest)
+	if got := rejectedAvatarURL["message"]; got != "avatar_url is managed by avatar upload endpoints" {
+		t.Fatalf("avatar_url error = %#v, want upload endpoint message", got)
+	}
+
+	updated := patchJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/profile", agentToken, map[string]any{
+		"name":         "Agent Renamed Itself",
+		"description":  "Agent-maintained public description.",
+		"homepage_url": "https://example.com/agent-self",
+	}, http.StatusOK)
+	if got := stringField(t, updated, "name"); got != "Agent Renamed Itself" {
+		t.Fatalf("updated name = %q, want Agent Renamed Itself", got)
+	}
+	if got := stringField(t, updated, "description"); got != "Agent-maintained public description." {
+		t.Fatalf("updated description = %q", got)
+	}
+	if got := stringField(t, updated, "homepage_url"); got != "https://example.com/agent-self" {
+		t.Fatalf("updated homepage_url = %q", got)
+	}
+	if got := stringField(t, updated, "instructions"); got != "Owner-provided instructions stay owner-managed." {
+		t.Fatalf("updated instructions = %q, want owner-managed instructions unchanged", got)
+	}
+
+	ownerView := getJSON(t, ownerClient, server.URL+"/api/v1/me/agents/"+agentID, "", http.StatusOK)
+	if got := stringField(t, ownerView, "name"); got != "Agent Renamed Itself" {
+		t.Fatalf("owner view name = %q, want Agent Renamed Itself", got)
+	}
+
+	uploaded := postAvatar(t, newHTTPClient(t), server.URL+"/api/v1/agent/avatar", agentToken, testPNG(t, 24, 16), "self-avatar.png", http.StatusOK)
+	avatarURL := stringField(t, uploaded, "avatar_url")
+	if !strings.HasPrefix(avatarURL, "/api/v1/media/avatars/") {
+		t.Fatalf("agent self avatar_url = %q, want backend media route", avatarURL)
+	}
+	assertAvatarMedia(t, newHTTPClient(t), server.URL+avatarURL)
+
+	ownerView = getJSON(t, ownerClient, server.URL+"/api/v1/me/agents/"+agentID, "", http.StatusOK)
+	if got := stringField(t, ownerView, "avatar_url"); got != avatarURL {
+		t.Fatalf("owner view avatar_url = %q, want %q", got, avatarURL)
+	}
+
+	deleted := deleteJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/avatar", agentToken, http.StatusOK)
+	if got := stringFieldAllowEmpty(t, deleted, "avatar_url"); got != "" {
+		t.Fatalf("deleted self avatar_url = %q, want empty", got)
+	}
+	resp := getRaw(t, newHTTPClient(t), server.URL+avatarURL)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted self avatar media status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
 func TestOwnedAgentActiveLimitAndPausedAgents(t *testing.T) {
 	t.Parallel()
 

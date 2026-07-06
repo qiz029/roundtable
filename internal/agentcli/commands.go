@@ -21,7 +21,96 @@ func runAgentProfile(ctx context.Context, args []string, opts Options) error {
 		}
 		return writePrettyJSON(opts.Stdout, resp)
 	}
-	return errors.New("usage: profile show")
+	if len(args) > 0 && args[0] == "set" {
+		return runAgentProfileSet(ctx, args[1:], opts)
+	}
+	return errors.New("usage: profile show | profile set [--name NAME] [--description TEXT] [--homepage-url URL]")
+}
+
+func runAgentProfileSet(ctx context.Context, args []string, opts Options) error {
+	fs := flag.NewFlagSet("profile set", flag.ContinueOnError)
+	fs.SetOutput(opts.Stderr)
+	name := fs.String("name", "", "Agent display name")
+	description := fs.String("description", "", "Agent public description")
+	homepageURL := fs.String("homepage-url", "", "Agent homepage URL")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected profile set arguments")
+	}
+	payload := map[string]any{}
+	fs.Visit(func(f *flag.Flag) {
+		switch f.Name {
+		case "name":
+			payload["name"] = strings.TrimSpace(*name)
+		case "description":
+			payload["description"] = strings.TrimSpace(*description)
+		case "homepage-url":
+			payload["homepage_url"] = strings.TrimSpace(*homepageURL)
+		}
+	})
+	if len(payload) == 0 {
+		return errors.New("--name, --description, or --homepage-url is required")
+	}
+	cfg, err := loadConfig(opts.HomeDir)
+	if err != nil {
+		return err
+	}
+	resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodPatch, "/api/v1/agent/profile", payload)
+	if err != nil {
+		return err
+	}
+	return writePrettyJSON(opts.Stdout, resp)
+}
+
+func runAvatar(ctx context.Context, args []string, opts Options) error {
+	if len(args) == 0 {
+		return errors.New("avatar subcommand is required")
+	}
+	switch args[0] {
+	case "upload":
+		return runAvatarUpload(ctx, args[1:], opts)
+	case "delete":
+		if len(args) != 1 {
+			return errors.New("usage: avatar delete")
+		}
+		cfg, err := loadConfig(opts.HomeDir)
+		if err != nil {
+			return err
+		}
+		resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodDelete, "/api/v1/agent/avatar", nil)
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(opts.Stdout, resp)
+	default:
+		return fmt.Errorf("unknown avatar command %q", args[0])
+	}
+}
+
+func runAvatarUpload(ctx context.Context, args []string, opts Options) error {
+	fs := flag.NewFlagSet("avatar upload", flag.ContinueOnError)
+	fs.SetOutput(opts.Stderr)
+	file := fs.String("file", "", "Path to a JPEG, PNG, or WebP avatar file")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected avatar upload arguments")
+	}
+	if strings.TrimSpace(*file) == "" {
+		return errors.New("--file is required")
+	}
+	cfg, err := loadConfig(opts.HomeDir)
+	if err != nil {
+		return err
+	}
+	resp, err := apiMultipartRequest[map[string]any](ctx, cfg, http.MethodPost, "/api/v1/agent/avatar", "avatar", strings.TrimSpace(*file))
+	if err != nil {
+		return err
+	}
+	return writePrettyJSON(opts.Stdout, resp)
 }
 
 func runProxyList(ctx context.Context, args []string, opts Options, name string, path string) error {

@@ -100,6 +100,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/answers/", a.handleUserAnswerAction)
 	mux.HandleFunc("/api/v1/comments/", a.handleCommentAction)
 	mux.HandleFunc("/api/v1/agent/healthz", a.handleHealth)
+	mux.HandleFunc("/api/v1/agent/avatar", a.handleAgentAvatar)
 	mux.HandleFunc("/api/v1/agent/profile", a.handleAgentProfile)
 	mux.HandleFunc("/api/v1/agent/feed", a.handleAgentFeed)
 	mux.HandleFunc("/api/v1/agent/invitations", a.handleAgentInvitations)

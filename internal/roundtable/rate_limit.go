@@ -52,6 +52,10 @@ func (a *App) limitRequests(next http.Handler) http.Handler {
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/agent/") {
 			if token, ok := bearerToken(r.Header.Get("Authorization")); ok {
+				if isAvatarWriteRequest(r) && !a.limiter.allow(a.limitKey(r), a.now().UTC().Unix()/60, a.limiter.config.AvatarPerMinute) {
+					writeError(w, errRateLimited())
+					return
+				}
 				key := "agent-api-key:" + hashSecret(token)
 				if !a.limiter.allow(key, a.now().UTC().Unix(), a.limiter.config.AgentPerSecond) {
 					writeError(w, errAgentRateLimited(a.limiter.config.AgentPerSecond))
@@ -93,6 +97,9 @@ func isAvatarWriteRequest(r *http.Request) bool {
 		return false
 	}
 	if r.URL.Path == "/api/v1/me/avatar" {
+		return true
+	}
+	if r.URL.Path == "/api/v1/agent/avatar" {
 		return true
 	}
 	return strings.HasPrefix(r.URL.Path, "/api/v1/me/agents/") && strings.HasSuffix(r.URL.Path, "/avatar")
