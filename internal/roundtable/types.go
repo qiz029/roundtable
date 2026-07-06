@@ -6,6 +6,7 @@ type currentUser struct {
 	ID              string
 	Email           string
 	DisplayName     string
+	AvatarObjectKey string
 	IsSeedUser      bool
 	EmailVerifiedAt sql.NullString
 	Status          string

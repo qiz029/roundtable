@@ -16,19 +16,23 @@ import (
 const sessionCookieName = "roundtable_session"
 
 type Options struct {
-	DatabaseURL  string
-	Mailer       Mailer
-	Now          func() time.Time
-	CookieSecure bool
-	RateLimit    RateLimitConfig
+	DatabaseURL         string
+	Mailer              Mailer
+	Now                 func() time.Time
+	CookieSecure        bool
+	RateLimit           RateLimitConfig
+	AvatarStore         AvatarStore
+	AvatarPublicBaseURL string
 }
 
 type App struct {
-	db           *sql.DB
-	mailer       Mailer
-	now          func() time.Time
-	cookieSecure bool
-	limiter      *rateLimiter
+	db                  *sql.DB
+	mailer              Mailer
+	now                 func() time.Time
+	cookieSecure        bool
+	limiter             *rateLimiter
+	avatarStore         AvatarStore
+	avatarPublicBaseURL string
 }
 
 func NewApp(opts Options) (*App, error) {
@@ -51,11 +55,13 @@ func NewApp(opts Options) (*App, error) {
 	db.SetConnMaxLifetime(30 * time.Minute)
 
 	app := &App{
-		db:           db,
-		mailer:       opts.Mailer,
-		now:          opts.Now,
-		cookieSecure: opts.CookieSecure,
-		limiter:      newRateLimiter(opts.RateLimit),
+		db:                  db,
+		mailer:              opts.Mailer,
+		now:                 opts.Now,
+		cookieSecure:        opts.CookieSecure,
+		limiter:             newRateLimiter(opts.RateLimit),
+		avatarStore:         opts.AvatarStore,
+		avatarPublicBaseURL: strings.TrimRight(strings.TrimSpace(opts.AvatarPublicBaseURL), "/"),
 	}
 	if err := app.migrate(context.Background()); err != nil {
 		_ = db.Close()
@@ -76,6 +82,8 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/auth/login", a.handleLogin)
 	mux.HandleFunc("/api/v1/auth/logout", a.handleLogout)
 	mux.HandleFunc("/api/v1/auth/me", a.handleMe)
+	mux.HandleFunc("/api/v1/media/avatars/", a.handleAvatarMedia)
+	mux.HandleFunc("/api/v1/me/avatar", a.handleMyAvatar)
 	mux.HandleFunc("/api/v1/me/profile", a.handleMyProfile)
 	mux.HandleFunc("/api/v1/me/rewards", a.handleMyRewards)
 	mux.HandleFunc("/api/v1/me/agents", a.handleMyAgents)
@@ -254,6 +262,9 @@ CREATE TABLE IF NOT EXISTS users (
 	bio TEXT NOT NULL DEFAULT '',
 	background TEXT NOT NULL DEFAULT '',
 	avatar_url TEXT NOT NULL DEFAULT '',
+	avatar_object_key TEXT NOT NULL DEFAULT '',
+	avatar_content_type TEXT NOT NULL DEFAULT '',
+	avatar_updated_at TEXT,
 	website_url TEXT NOT NULL DEFAULT '',
 	social_links_json TEXT NOT NULL DEFAULT '[]',
 	password_hash TEXT NOT NULL,
@@ -286,6 +297,9 @@ CREATE TABLE IF NOT EXISTS agents (
 	owner_user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
 	name TEXT NOT NULL,
 	description TEXT NOT NULL DEFAULT '',
+	avatar_object_key TEXT NOT NULL DEFAULT '',
+	avatar_content_type TEXT NOT NULL DEFAULT '',
+	avatar_updated_at TEXT,
 	tags_json TEXT NOT NULL DEFAULT '[]',
 	capabilities_json TEXT NOT NULL DEFAULT '[]',
 	instructions TEXT NOT NULL DEFAULT '',
@@ -518,6 +532,9 @@ CREATE INDEX IF NOT EXISTS votes_answer_active
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS bio TEXT NOT NULL DEFAULT '';
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS background TEXT NOT NULL DEFAULT '';
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_url TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_object_key TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_content_type TEXT NOT NULL DEFAULT '';
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS avatar_updated_at TEXT;
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS website_url TEXT NOT NULL DEFAULT '';
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS social_links_json TEXT NOT NULL DEFAULT '[]';
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_limit INTEGER NOT NULL DEFAULT 3;
@@ -525,5 +542,8 @@ CREATE INDEX IF NOT EXISTS votes_answer_active
 
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT '';
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS homepage_url TEXT NOT NULL DEFAULT '';
+	ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_object_key TEXT NOT NULL DEFAULT '';
+	ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_content_type TEXT NOT NULL DEFAULT '';
+	ALTER TABLE agents ADD COLUMN IF NOT EXISTS avatar_updated_at TEXT;
 	ALTER TABLE votes ADD COLUMN IF NOT EXISTS revoked_at TEXT;
 	`

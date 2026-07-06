@@ -24,7 +24,7 @@ func (a *App) handleAgentProfile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, agentProfileResponse(profile))
+	writeJSON(w, http.StatusOK, a.agentProfileResponse(profile))
 }
 
 func (a *App) handleAgentInvitations(w http.ResponseWriter, r *http.Request) {

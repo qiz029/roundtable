@@ -6,6 +6,11 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
+	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -294,9 +299,11 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	defer app.Close()
 
 	assertSelectable(t, db, `SELECT full_name, bio, background, avatar_url, website_url, social_links_json FROM users LIMIT 0`)
+	assertSelectable(t, db, `SELECT avatar_object_key, avatar_content_type, avatar_updated_at FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT agent_limit FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT is_seed_user FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT instructions, homepage_url FROM agents LIMIT 0`)
+	assertSelectable(t, db, `SELECT avatar_object_key, avatar_content_type, avatar_updated_at FROM agents LIMIT 0`)
 	assertSelectable(t, db, `SELECT answer_id, query, tags_json FROM feed_events LIMIT 0`)
 	assertSelectable(t, db, `SELECT follower_user_id, followee_user_id, created_at FROM user_follows LIMIT 0`)
 	assertSelectable(t, db, `SELECT revoked_at FROM votes LIMIT 0`)
@@ -427,6 +434,9 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	if got := len(listField(t, initial, "social_links")); got != 0 {
 		t.Fatalf("initial social_links count = %d, want 0", got)
 	}
+	if got := stringFieldAllowEmpty(t, initial, "avatar_url"); got != "" {
+		t.Fatalf("initial avatar_url = %q, want empty", got)
+	}
 	if got := intField(t, initial, "follower_count"); got != 0 {
 		t.Fatalf("initial follower_count = %d, want 0", got)
 	}
@@ -439,7 +449,6 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 		"full_name":    "Ada Lovelace",
 		"bio":          "Builds agent collaboration tools.",
 		"background":   "Distributed systems and developer tooling.",
-		"avatar_url":   "https://example.com/avatar.png",
 		"website_url":  "https://example.com",
 		"social_links": []map[string]any{
 			{"label": "GitHub", "url": "https://github.com/example"},
@@ -468,6 +477,9 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	if got := stringField(t, me, "display_name"); got != "Owner Renamed" {
 		t.Fatalf("auth/me display_name = %q, want Owner Renamed", got)
 	}
+	if got := stringFieldAllowEmpty(t, me, "avatar_url"); got != "" {
+		t.Fatalf("auth/me avatar_url = %q, want empty", got)
+	}
 
 	public := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/"+userID+"/profile", "", http.StatusOK)
 	if got := stringField(t, public, "display_name"); got != "Owner Renamed" {
@@ -479,6 +491,16 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	if got := len(listField(t, public, "social_links")); got != 2 {
 		t.Fatalf("public social_links count = %d, want 2", got)
 	}
+	if got := stringFieldAllowEmpty(t, public, "avatar_url"); got != "" {
+		t.Fatalf("public avatar_url = %q, want empty", got)
+	}
+
+	badAvatar := patchJSON(t, userClient, server.URL+"/api/v1/me/profile", "", map[string]any{
+		"avatar_url": "https://example.com/avatar.png",
+	}, http.StatusBadRequest)
+	if got := badAvatar["message"]; got != "avatar_url is managed by avatar upload endpoints" {
+		t.Fatalf("bad avatar message = %#v", got)
+	}
 
 	badLink := patchJSON(t, userClient, server.URL+"/api/v1/me/profile", "", map[string]any{
 		"social_links": []map[string]any{{"label": "GitHub"}},
@@ -488,6 +510,97 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	}
 
 	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/usr_missing/profile", "", http.StatusNotFound)
+}
+
+func TestUserAvatarUploadDeleteAndProfileSurfaces(t *testing.T) {
+	t.Parallel()
+
+	store, err := roundtable.NewLocalAvatarStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new avatar store: %v", err)
+	}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:      mailer,
+		AvatarStore: store,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	ownerClient := newHTTPClient(t)
+	ownerID := registerVerifyAndLoginUser(t, ownerClient, server.URL, mailer, "avatar-owner@example.com", "Avatar Owner")
+	initial := getJSON(t, ownerClient, server.URL+"/api/v1/me/profile", "", http.StatusOK)
+	if got := stringFieldAllowEmpty(t, initial, "avatar_url"); got != "" {
+		t.Fatalf("initial avatar_url = %q, want empty", got)
+	}
+
+	rejected := patchJSON(t, ownerClient, server.URL+"/api/v1/me/profile", "", map[string]any{
+		"avatar_url": "https://example.com/not-accepted.png",
+	}, http.StatusBadRequest)
+	if got := rejected["message"]; got != "avatar_url is managed by avatar upload endpoints" {
+		t.Fatalf("avatar_url patch message = %#v", got)
+	}
+
+	invalid := postAvatar(t, ownerClient, server.URL+"/api/v1/me/avatar", "", []byte("<svg></svg>"), "avatar.svg", http.StatusBadRequest)
+	if got := invalid["code"]; got != "invalid_input" {
+		t.Fatalf("invalid avatar code = %#v, want invalid_input", got)
+	}
+
+	uploaded := postAvatar(t, ownerClient, server.URL+"/api/v1/me/avatar", "", testPNG(t, 16, 12), "avatar.png", http.StatusOK)
+	avatarURL := stringField(t, uploaded, "avatar_url")
+	if !strings.HasPrefix(avatarURL, "/api/v1/media/avatars/") {
+		t.Fatalf("avatar_url = %q, want backend media route", avatarURL)
+	}
+	assertAvatarMedia(t, newHTTPClient(t), server.URL+avatarURL)
+
+	me := getJSON(t, ownerClient, server.URL+"/api/v1/auth/me", "", http.StatusOK)
+	if got := stringField(t, me, "avatar_url"); got != avatarURL {
+		t.Fatalf("auth/me avatar_url = %q, want %q", got, avatarURL)
+	}
+	public := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/"+ownerID+"/profile", "", http.StatusOK)
+	if got := stringField(t, public, "avatar_url"); got != avatarURL {
+		t.Fatalf("public avatar_url = %q, want %q", got, avatarURL)
+	}
+
+	followerClient := newHTTPClient(t)
+	followerID := registerVerifyAndLoginUser(t, followerClient, server.URL, mailer, "avatar-follower@example.com", "Avatar Follower")
+	followerUpload := postAvatar(t, followerClient, server.URL+"/api/v1/me/avatar", "", testPNG(t, 10, 10), "follower.png", http.StatusOK)
+	followerAvatarURL := stringField(t, followerUpload, "avatar_url")
+	postJSON(t, followerClient, server.URL+"/api/v1/users/"+ownerID+"/follow", "", nil, http.StatusOK)
+
+	followers := getJSON(t, ownerClient, server.URL+"/api/v1/users/"+ownerID+"/followers", "", http.StatusOK)
+	followerItems := listField(t, followers, "items")
+	if got := stringField(t, followerItems[0].(map[string]any), "id"); got != followerID {
+		t.Fatalf("follower id = %q, want %q", got, followerID)
+	}
+	if got := stringField(t, followerItems[0].(map[string]any), "avatar_url"); got != followerAvatarURL {
+		t.Fatalf("follower avatar_url = %q, want %q", got, followerAvatarURL)
+	}
+	following := getJSON(t, followerClient, server.URL+"/api/v1/users/"+followerID+"/following", "", http.StatusOK)
+	followingItems := listField(t, following, "items")
+	if got := stringField(t, followingItems[0].(map[string]any), "id"); got != ownerID {
+		t.Fatalf("following id = %q, want %q", got, ownerID)
+	}
+	if got := stringField(t, followingItems[0].(map[string]any), "avatar_url"); got != avatarURL {
+		t.Fatalf("following avatar_url = %q, want %q", got, avatarURL)
+	}
+
+	deleted := deleteJSON(t, ownerClient, server.URL+"/api/v1/me/avatar", "", http.StatusOK)
+	if got := stringFieldAllowEmpty(t, deleted, "avatar_url"); got != "" {
+		t.Fatalf("deleted avatar_url = %q, want empty", got)
+	}
+	resp := getRaw(t, newHTTPClient(t), server.URL+avatarURL)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted avatar media status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
 }
 
 func TestUserFollowFlow(t *testing.T) {
@@ -688,6 +801,139 @@ func TestOwnedAgentProfileGetAndPatch(t *testing.T) {
 	patchJSON(t, otherClient, server.URL+"/api/v1/me/agents/"+agentID, "", map[string]any{
 		"name": "Hijacked",
 	}, http.StatusNotFound)
+}
+
+func TestAgentAvatarUploadDeleteAndEmbeddedSurfaces(t *testing.T) {
+	t.Parallel()
+
+	store, err := roundtable.NewLocalAvatarStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new avatar store: %v", err)
+	}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:      mailer,
+		AvatarStore: store,
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	ownerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, ownerClient, server.URL, mailer, "agent-avatar-owner@example.com", "Agent Avatar Owner")
+	agentResp := postJSON(t, ownerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Avatar Agent",
+		"description":  "Avatar-owning agent.",
+		"tags":         []string{"avatar"},
+		"capabilities": []string{"answering"},
+		"is_public":    true,
+	}, http.StatusCreated)
+	agentID := stringField(t, agentResp, "id")
+	agentToken := stringField(t, agentResp, "token")
+	if got := stringFieldAllowEmpty(t, agentResp, "avatar_url"); got != "" {
+		t.Fatalf("created agent avatar_url = %q, want empty", got)
+	}
+
+	rejectedPatch := patchJSON(t, ownerClient, server.URL+"/api/v1/me/agents/"+agentID, "", map[string]any{
+		"avatar_url": "https://example.com/agent.png",
+	}, http.StatusBadRequest)
+	if got := rejectedPatch["message"]; got != "avatar_url is managed by avatar upload endpoints" {
+		t.Fatalf("agent avatar patch message = %#v", got)
+	}
+	rejectedCreate := postJSON(t, ownerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":       "Rejected Avatar Agent",
+		"avatar_url": "https://example.com/agent.png",
+	}, http.StatusBadRequest)
+	if got := rejectedCreate["message"]; got != "avatar_url is managed by avatar upload endpoints" {
+		t.Fatalf("agent avatar create message = %#v", got)
+	}
+
+	uploaded := postAvatar(t, ownerClient, server.URL+"/api/v1/me/agents/"+agentID+"/avatar", "", testPNG(t, 20, 14), "agent.png", http.StatusOK)
+	agentAvatarURL := stringField(t, uploaded, "avatar_url")
+	if !strings.HasPrefix(agentAvatarURL, "/api/v1/media/avatars/") {
+		t.Fatalf("agent avatar_url = %q, want backend media route", agentAvatarURL)
+	}
+	assertAvatarMedia(t, newHTTPClient(t), server.URL+agentAvatarURL)
+
+	detail := getJSON(t, ownerClient, server.URL+"/api/v1/me/agents/"+agentID, "", http.StatusOK)
+	if got := stringField(t, detail, "avatar_url"); got != agentAvatarURL {
+		t.Fatalf("agent detail avatar_url = %q, want %q", got, agentAvatarURL)
+	}
+	list := getJSON(t, ownerClient, server.URL+"/api/v1/me/agents", "", http.StatusOK)
+	listed := listField(t, list, "items")[0].(map[string]any)
+	if got := stringField(t, listed, "avatar_url"); got != agentAvatarURL {
+		t.Fatalf("agent list avatar_url = %q, want %q", got, agentAvatarURL)
+	}
+	agentProfile := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/profile", agentToken, http.StatusOK)
+	if got := stringField(t, agentProfile, "avatar_url"); got != agentAvatarURL {
+		t.Fatalf("agent bearer profile avatar_url = %q, want %q", got, agentAvatarURL)
+	}
+
+	otherClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, otherClient, server.URL, mailer, "agent-avatar-other@example.com", "Other Agent Owner")
+	postAvatar(t, otherClient, server.URL+"/api/v1/me/agents/"+agentID+"/avatar", "", testPNG(t, 8, 8), "hijack.png", http.StatusNotFound)
+	postAvatar(t, ownerClient, server.URL+"/api/v1/agents/"+agentID+"/avatar", "", testPNG(t, 8, 8), "alias.png", http.StatusNotFound)
+
+	question := postJSON(t, ownerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Do embedded answer agents expose avatars?",
+		"body":  "The answer payload should carry the answering agent avatar.",
+		"tags":  []string{"avatar"},
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+	answer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", agentToken, map[string]any{
+		"body": "Yes, answer payloads carry the normalized avatar URL.",
+	}, http.StatusCreated)
+	answerID := stringField(t, answer, "id")
+
+	detailWithAnswer := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK)
+	answerItems := listField(t, detailWithAnswer, "answers")
+	answerAgent := mapField(t, answerItems[0].(map[string]any), "agent")
+	if got := stringField(t, answerAgent, "avatar_url"); got != agentAvatarURL {
+		t.Fatalf("question detail answer avatar_url = %q, want %q", got, agentAvatarURL)
+	}
+
+	answerFeed := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/feed/answers", "", http.StatusOK)
+	feedAnswer := answerFeedItem(t, answerFeed, answerID)
+	feedAgent := mapField(t, feedAnswer, "agent")
+	if got := stringField(t, feedAgent, "avatar_url"); got != agentAvatarURL {
+		t.Fatalf("answer feed agent avatar_url = %q, want %q", got, agentAvatarURL)
+	}
+
+	secondAgentResp := postJSON(t, otherClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":         "Response Avatar Agent",
+		"description":  "Responds with an avatar.",
+		"tags":         []string{"avatar"},
+		"capabilities": []string{"responding"},
+		"is_public":    true,
+	}, http.StatusCreated)
+	secondAgentID := stringField(t, secondAgentResp, "id")
+	secondAgentToken := stringField(t, secondAgentResp, "token")
+	secondUpload := postAvatar(t, otherClient, server.URL+"/api/v1/me/agents/"+secondAgentID+"/avatar", "", testPNG(t, 18, 18), "response-agent.png", http.StatusOK)
+	secondAvatarURL := stringField(t, secondUpload, "avatar_url")
+	response := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+answerID+"/responses", secondAgentToken, map[string]any{
+		"body":   "The responder identity should also carry an avatar.",
+		"stance": "extend",
+	}, http.StatusCreated)
+	responseAgent := mapField(t, response, "agent")
+	if got := stringField(t, responseAgent, "avatar_url"); got != secondAvatarURL {
+		t.Fatalf("response agent avatar_url = %q, want %q", got, secondAvatarURL)
+	}
+
+	deleted := deleteJSON(t, ownerClient, server.URL+"/api/v1/me/agents/"+agentID+"/avatar", "", http.StatusOK)
+	if got := stringFieldAllowEmpty(t, deleted, "avatar_url"); got != "" {
+		t.Fatalf("deleted agent avatar_url = %q, want empty", got)
+	}
+	resp := getRaw(t, newHTTPClient(t), server.URL+agentAvatarURL)
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("deleted agent avatar media status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
 }
 
 func TestOwnedAgentActiveLimitAndPausedAgents(t *testing.T) {
@@ -2735,6 +2981,87 @@ func deleteJSON(t *testing.T, client *http.Client, url string, bearerToken strin
 	return decoded
 }
 
+func postAvatar(t *testing.T, client *http.Client, url string, bearerToken string, body []byte, filename string, wantStatus int) map[string]any {
+	t.Helper()
+
+	var payload bytes.Buffer
+	writer := multipart.NewWriter(&payload)
+	part, err := writer.CreateFormFile("avatar", filename)
+	if err != nil {
+		t.Fatalf("create avatar form field: %v", err)
+	}
+	if _, err := part.Write(body); err != nil {
+		t.Fatalf("write avatar form field: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("close multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, url, &payload)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	if bearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+bearerToken)
+	}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("post avatar %s: %v", url, err)
+	}
+	defer resp.Body.Close()
+
+	var decoded map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.StatusCode != wantStatus {
+		t.Fatalf("post avatar %s status = %d, want %d, body = %#v", url, resp.StatusCode, wantStatus, decoded)
+	}
+	return decoded
+}
+
+func testPNG(t *testing.T, width int, height int) []byte {
+	t.Helper()
+
+	img := image.NewRGBA(image.Rect(0, 0, width, height))
+	for y := 0; y < height; y++ {
+		for x := 0; x < width; x++ {
+			img.Set(x, y, color.RGBA{R: 64, G: 128, B: 192, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, img); err != nil {
+		t.Fatalf("encode png: %v", err)
+	}
+	return buf.Bytes()
+}
+
+func assertAvatarMedia(t *testing.T, client *http.Client, url string) {
+	t.Helper()
+
+	resp, err := client.Get(url)
+	if err != nil {
+		t.Fatalf("get avatar media: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("avatar media status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	if got := resp.Header.Get("Content-Type"); got != "image/jpeg" {
+		t.Fatalf("avatar media content-type = %q, want image/jpeg", got)
+	}
+	if got := resp.Header.Get("Content-Disposition"); got != `inline; filename="avatar.jpg"` {
+		t.Fatalf("avatar content disposition = %q", got)
+	}
+	if got := resp.Header.Get("X-Content-Type-Options"); got != "nosniff" {
+		t.Fatalf("avatar nosniff header = %q", got)
+	}
+	if _, err := jpeg.Decode(resp.Body); err != nil {
+		t.Fatalf("decode normalized avatar jpeg: %v", err)
+	}
+}
+
 func getJSON(t *testing.T, client *http.Client, url string, bearerToken string, wantStatus int) map[string]any {
 	t.Helper()
 
@@ -2768,6 +3095,16 @@ func stringField(t *testing.T, values map[string]any, name string) string {
 	value, ok := values[name].(string)
 	if !ok || value == "" {
 		t.Fatalf("field %q = %#v, want non-empty string", name, values[name])
+	}
+	return value
+}
+
+func stringFieldAllowEmpty(t *testing.T, values map[string]any, name string) string {
+	t.Helper()
+
+	value, ok := values[name].(string)
+	if !ok {
+		t.Fatalf("field %q = %#v, want string", name, values[name])
 	}
 	return value
 }
@@ -2920,6 +3257,20 @@ func assertAnswerCommentCount(t *testing.T, question map[string]any, answerID st
 		}
 	}
 	t.Fatalf("answer %s was not present in question detail", answerID)
+}
+
+func answerFeedItem(t *testing.T, feed map[string]any, answerID string) map[string]any {
+	t.Helper()
+
+	for _, raw := range listField(t, feed, "items") {
+		item := raw.(map[string]any)
+		answer := mapField(t, item, "answer")
+		if stringField(t, answer, "id") == answerID {
+			return answer
+		}
+	}
+	t.Fatalf("answer %s was not present in answer feed", answerID)
+	return nil
 }
 
 func assertAnswerFeedCommentCount(t *testing.T, feed map[string]any, answerID string, want int) {

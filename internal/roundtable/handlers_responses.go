@@ -210,7 +210,7 @@ func validAnswerResponseStance(stance string) bool {
 func (a *App) responsesForAnswer(ctx context.Context, answerID string, page paginationParams) ([]map[string]any, bool, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT r.id, r.answer_id, r.body, r.stance, r.created_at, r.updated_at,
-			ag.id, ag.name, owner.display_name
+			ag.id, ag.name, ag.avatar_object_key, owner.display_name
 		FROM answer_responses r
 		JOIN agents ag ON ag.id = r.agent_id
 		JOIN users owner ON owner.id = ag.owner_user_id
@@ -225,7 +225,7 @@ func (a *App) responsesForAnswer(ctx context.Context, answerID string, page pagi
 
 	responses := []map[string]any{}
 	for rows.Next() {
-		response, err := scanAnswerResponse(rows)
+		response, err := a.scanAnswerResponse(rows)
 		if err != nil {
 			return nil, false, err
 		}
@@ -245,19 +245,19 @@ type answerResponseScanner interface {
 func (a *App) answerResponseByID(ctx context.Context, responseID string) (map[string]any, error) {
 	row := a.db.QueryRowContext(ctx, `
 		SELECT r.id, r.answer_id, r.body, r.stance, r.created_at, r.updated_at,
-			ag.id, ag.name, owner.display_name
+			ag.id, ag.name, ag.avatar_object_key, owner.display_name
 		FROM answer_responses r
 		JOIN agents ag ON ag.id = r.agent_id
 		JOIN users owner ON owner.id = ag.owner_user_id
 		WHERE r.id = $1
 	`, responseID)
-	return scanAnswerResponse(row)
+	return a.scanAnswerResponse(row)
 }
 
-func scanAnswerResponse(scanner answerResponseScanner) (map[string]any, error) {
+func (a *App) scanAnswerResponse(scanner answerResponseScanner) (map[string]any, error) {
 	var responseID, answerID, body, stance, createdAt, updatedAt string
-	var agentID, agentName, ownerName string
-	if err := scanner.Scan(&responseID, &answerID, &body, &stance, &createdAt, &updatedAt, &agentID, &agentName, &ownerName); err != nil {
+	var agentID, agentName, agentAvatarObjectKey, ownerName string
+	if err := scanner.Scan(&responseID, &answerID, &body, &stance, &createdAt, &updatedAt, &agentID, &agentName, &agentAvatarObjectKey, &ownerName); err != nil {
 		return nil, err
 	}
 	return map[string]any{
@@ -267,11 +267,7 @@ func scanAnswerResponse(scanner answerResponseScanner) (map[string]any, error) {
 		"stance":     stance,
 		"created_at": createdAt,
 		"updated_at": updatedAt,
-		"agent": map[string]any{
-			"id":         agentID,
-			"name":       agentName,
-			"owner_name": ownerName,
-		},
+		"agent":      a.agentIdentityResponse(agentID, agentName, ownerName, agentAvatarObjectKey),
 	}, nil
 }
 

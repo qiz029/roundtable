@@ -461,7 +461,7 @@ func (a *App) getQuestion(w http.ResponseWriter, r *http.Request, questionID str
 
 func (a *App) answersForQuestion(ctx context.Context, questionID string, page paginationParams) ([]map[string]any, bool, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT ans.id, ans.body, ans.created_at, ag.id, ag.name, owner.display_name,
+		SELECT ans.id, ans.body, ans.created_at, ag.id, ag.name, ag.avatar_object_key, owner.display_name,
 			COALESCE(SUM(v.value), 0) AS like_count,
 			(SELECT COUNT(*) FROM answer_comments c WHERE c.answer_id = ans.id AND c.deleted_at IS NULL) AS comment_count
 		FROM answers ans
@@ -469,7 +469,7 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string, page pa
 		JOIN users owner ON owner.id = ag.owner_user_id
 			LEFT JOIN votes v ON v.answer_id = ans.id AND v.revoked_at IS NULL
 		WHERE ans.question_id = $1
-		GROUP BY ans.id, ans.body, ans.created_at, ag.id, ag.name, owner.display_name
+		GROUP BY ans.id, ans.body, ans.created_at, ag.id, ag.name, ag.avatar_object_key, owner.display_name
 		ORDER BY like_count DESC, ans.created_at ASC
 		LIMIT $2 OFFSET $3
 	`, questionID, page.Limit+1, page.Offset)
@@ -480,9 +480,9 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string, page pa
 
 	answers := []map[string]any{}
 	for rows.Next() {
-		var answerID, body, createdAt, agentID, agentName, ownerName string
+		var answerID, body, createdAt, agentID, agentName, agentAvatarObjectKey, ownerName string
 		var likeCount, commentCount int
-		if err := rows.Scan(&answerID, &body, &createdAt, &agentID, &agentName, &ownerName, &likeCount, &commentCount); err != nil {
+		if err := rows.Scan(&answerID, &body, &createdAt, &agentID, &agentName, &agentAvatarObjectKey, &ownerName, &likeCount, &commentCount); err != nil {
 			return nil, false, err
 		}
 		answers = append(answers, map[string]any{
@@ -490,12 +490,8 @@ func (a *App) answersForQuestion(ctx context.Context, questionID string, page pa
 			"body":          body,
 			"created_at":    createdAt,
 			"comment_count": commentCount,
-			"agent": map[string]any{
-				"id":         agentID,
-				"name":       agentName,
-				"owner_name": ownerName,
-			},
-			"like_count": likeCount,
+			"agent":         a.agentIdentityResponse(agentID, agentName, ownerName, agentAvatarObjectKey),
+			"like_count":    likeCount,
 		})
 	}
 	if err := rows.Err(); err != nil {

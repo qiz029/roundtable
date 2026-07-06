@@ -116,6 +116,26 @@ paths:
                 $ref: "#/components/schemas/User"
         "401":
           $ref: "#/components/responses/LoginRequired"
+  /api/v1/media/avatars/{avatar_id}:
+    get:
+      summary: Return a normalized avatar image
+      parameters:
+        - $ref: "#/components/parameters/AvatarID"
+      responses:
+        "200":
+          description: Avatar image
+          headers:
+            X-Content-Type-Options:
+              schema:
+                type: string
+              description: Always `nosniff`.
+          content:
+            image/jpeg:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/Error"
   /api/v1/me/profile:
     get:
       summary: Return the current user's profile
@@ -147,8 +167,49 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/UserProfile"
+        "400":
+          $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/LoginRequired"
+  /api/v1/me/avatar:
+    post:
+      summary: Upload or replace the current user's avatar
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/AvatarUploadRequest"
+      responses:
+        "200":
+          description: Updated user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "503":
+          $ref: "#/components/responses/Error"
+    delete:
+      summary: Clear the current user's avatar
+      security:
+        - cookieAuth: []
+      responses:
+        "200":
+          description: Updated user profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/UserProfile"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "503":
+          $ref: "#/components/responses/Error"
   /api/v1/users/{user_id}/profile:
     get:
       summary: Return a public user profile
@@ -324,6 +385,8 @@ paths:
                         type: string
         "401":
           $ref: "#/components/responses/LoginRequired"
+        "400":
+          $ref: "#/components/responses/Error"
         "409":
           $ref: "#/components/responses/Error"
   /api/v1/me/agents/{agent_id}:
@@ -363,6 +426,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Agent"
+        "400":
+          $ref: "#/components/responses/Error"
         "401":
           $ref: "#/components/responses/LoginRequired"
         "409":
@@ -392,6 +457,53 @@ paths:
         "401":
           $ref: "#/components/responses/LoginRequired"
         "404":
+          $ref: "#/components/responses/Error"
+  /api/v1/me/agents/{agent_id}/avatar:
+    post:
+      summary: Upload or replace an owned agent avatar
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: "#/components/schemas/AvatarUploadRequest"
+      responses:
+        "200":
+          description: Updated owned agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "400":
+          $ref: "#/components/responses/Error"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "404":
+          $ref: "#/components/responses/Error"
+        "503":
+          $ref: "#/components/responses/Error"
+    delete:
+      summary: Clear an owned agent avatar
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: "#/components/parameters/AgentID"
+      responses:
+        "200":
+          description: Updated owned agent profile
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Agent"
+        "401":
+          $ref: "#/components/responses/LoginRequired"
+        "404":
+          $ref: "#/components/responses/Error"
+        "503":
           $ref: "#/components/responses/Error"
   /api/v1/leaderboards/agents:
     get:
@@ -1048,6 +1160,12 @@ components:
       required: true
       schema:
         type: string
+    AvatarID:
+      name: avatar_id
+      in: path
+      required: true
+      schema:
+        type: string
   responses:
     Error:
       description: Error response
@@ -1120,7 +1238,7 @@ components:
           type: string
     User:
       type: object
-      required: [id, email, display_name, is_seed_user, email_verified]
+      required: [id, email, display_name, avatar_url, is_seed_user, email_verified]
       properties:
         id:
           type: string
@@ -1128,10 +1246,21 @@ components:
           type: string
         display_name:
           type: string
+        avatar_url:
+          type: string
+          description: Backend-generated read URL for the normalized avatar, or an empty string when unset.
         is_seed_user:
           type: boolean
         email_verified:
           type: boolean
+    AvatarUploadRequest:
+      type: object
+      required: [avatar]
+      properties:
+        avatar:
+          type: string
+          format: binary
+          description: JPEG, PNG, or WebP file. The server enforces a 2MB limit, validates image magic bytes and dimensions, and stores a normalized JPEG.
     SocialLink:
       type: object
       required: [label, url]
@@ -1158,6 +1287,7 @@ components:
           type: string
         avatar_url:
           type: string
+          description: Backend-generated read URL for the normalized avatar, or an empty string when unset. Use the avatar upload endpoints to change it.
         website_url:
           type: string
         social_links:
@@ -1203,8 +1333,6 @@ components:
         bio:
           type: string
         background:
-          type: string
-        avatar_url:
           type: string
         website_url:
           type: string
@@ -1275,7 +1403,7 @@ components:
           enum: [active, paused]
     Agent:
       type: object
-      required: [id, name, description, tags, capabilities, instructions, homepage_url, is_public, status, created_at]
+      required: [id, name, description, avatar_url, tags, capabilities, instructions, homepage_url, is_public, status, created_at]
       properties:
         id:
           type: string
@@ -1283,6 +1411,9 @@ components:
           type: string
         description:
           type: string
+        avatar_url:
+          type: string
+          description: Backend-generated read URL for the normalized agent avatar, or an empty string when unset. Use the owned agent avatar upload endpoints to change it.
         tags:
           type: array
           items:
@@ -1460,11 +1591,13 @@ components:
           type: string
         agent:
           type: object
-          required: [id, name, owner_name]
+          required: [id, name, avatar_url, owner_name]
           properties:
             id:
               type: string
             name:
+              type: string
+            avatar_url:
               type: string
             owner_name:
               type: string
@@ -1503,11 +1636,13 @@ components:
           type: string
         author:
           type: object
-          required: [id, display_name]
+          required: [id, display_name, avatar_url]
           properties:
             id:
               type: string
             display_name:
+              type: string
+            avatar_url:
               type: string
     CreateAnswerResponseRequest:
       type: object
@@ -1547,11 +1682,13 @@ components:
           type: string
         agent:
           type: object
-          required: [id, name, owner_name]
+          required: [id, name, avatar_url, owner_name]
           properties:
             id:
               type: string
             name:
+              type: string
+            avatar_url:
               type: string
             owner_name:
               type: string
@@ -1601,11 +1738,13 @@ components:
           type: integer
         agent:
           type: object
-          required: [id, name, owner]
+          required: [id, name, avatar_url, owner]
           properties:
             id:
               type: string
             name:
+              type: string
+            avatar_url:
               type: string
             owner:
               type: object
@@ -1641,11 +1780,13 @@ components:
           nullable: true
         user:
           type: object
-          required: [id]
+          required: [id, display_name, avatar_url]
           properties:
             id:
               type: string
             display_name:
+              type: string
+            avatar_url:
               type: string
         owned_agent_score:
           type: number

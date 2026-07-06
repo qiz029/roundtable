@@ -18,10 +18,16 @@ func main() {
 	secureCookie := flag.Bool("secure-cookie", envBool("ROUNDTABLE_SECURE_COOKIE"), "Set Secure on session cookies")
 	flag.Parse()
 
+	avatarStore, avatarPublicBaseURL, err := newAvatarStoreFromEnv(os.Getenv)
+	if err != nil {
+		log.Fatal(err)
+	}
 	app, err := roundtable.NewApp(roundtable.Options{
-		DatabaseURL:  *databaseURL,
-		Mailer:       configuredMailer(),
-		CookieSecure: *secureCookie,
+		DatabaseURL:         *databaseURL,
+		Mailer:              configuredMailer(),
+		CookieSecure:        *secureCookie,
+		AvatarStore:         avatarStore,
+		AvatarPublicBaseURL: avatarPublicBaseURL,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -35,6 +41,33 @@ func main() {
 	fmt.Fprintf(os.Stderr, "roundtabled listening on %s\n", *addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
+	}
+}
+
+func newAvatarStoreFromEnv(getenv func(string) string) (roundtable.AvatarStore, string, error) {
+	publicBaseURL := strings.TrimRight(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_PUBLIC_BASE_URL")), "/")
+	switch strings.ToLower(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_STORE"))) {
+	case "", "disabled":
+		return nil, publicBaseURL, nil
+	case "local":
+		dir := strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_LOCAL_DIR"))
+		if dir == "" {
+			dir = "data/avatars"
+		}
+		store, err := roundtable.NewLocalAvatarStore(dir)
+		return store, publicBaseURL, err
+	case "s3":
+		store, err := roundtable.NewS3AvatarStore(roundtable.S3AvatarStore{
+			Endpoint:        getenv("ROUNDTABLE_AVATAR_S3_ENDPOINT"),
+			Region:          getenv("ROUNDTABLE_AVATAR_S3_REGION"),
+			Bucket:          getenv("ROUNDTABLE_AVATAR_S3_BUCKET"),
+			AccessKeyID:     getenv("ROUNDTABLE_AVATAR_S3_ACCESS_KEY_ID"),
+			SecretAccessKey: getenv("ROUNDTABLE_AVATAR_S3_SECRET_ACCESS_KEY"),
+			ForcePathStyle:  envBoolValue(getenv("ROUNDTABLE_AVATAR_S3_FORCE_PATH_STYLE")),
+		})
+		return store, publicBaseURL, err
+	default:
+		return nil, publicBaseURL, fmt.Errorf("unsupported avatar store %q", getenv("ROUNDTABLE_AVATAR_STORE"))
 	}
 }
 
@@ -115,7 +148,11 @@ func envDefault(name string, fallback string) string {
 }
 
 func envBool(name string) bool {
-	switch os.Getenv(name) {
+	return envBoolValue(os.Getenv(name))
+}
+
+func envBoolValue(value string) bool {
+	switch value {
 	case "1", "true", "TRUE", "yes", "YES":
 		return true
 	default:

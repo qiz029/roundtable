@@ -8,9 +8,10 @@ import (
 )
 
 type RateLimitConfig struct {
-	AuthPerMinute  int
-	AgentPerSecond int
-	VotePerMinute  int
+	AuthPerMinute   int
+	AgentPerSecond  int
+	VotePerMinute   int
+	AvatarPerMinute int
 }
 
 type rateLimiter struct {
@@ -33,6 +34,9 @@ func newRateLimiter(config RateLimitConfig) *rateLimiter {
 	}
 	if config.VotePerMinute == 0 {
 		config.VotePerMinute = 120
+	}
+	if config.AvatarPerMinute == 0 {
+		config.AvatarPerMinute = 20
 	}
 	return &rateLimiter{
 		config:  config,
@@ -78,7 +82,20 @@ func (a *App) limitFor(r *http.Request) (int, bool) {
 	if strings.HasSuffix(r.URL.Path, "/like") && (r.Method == http.MethodPost || r.Method == http.MethodDelete) {
 		return a.limiter.config.VotePerMinute, true
 	}
+	if isAvatarWriteRequest(r) {
+		return a.limiter.config.AvatarPerMinute, true
+	}
 	return 0, false
+}
+
+func isAvatarWriteRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		return false
+	}
+	if r.URL.Path == "/api/v1/me/avatar" {
+		return true
+	}
+	return strings.HasPrefix(r.URL.Path, "/api/v1/me/agents/") && strings.HasSuffix(r.URL.Path, "/avatar")
 }
 
 func (a *App) limitKey(r *http.Request) string {

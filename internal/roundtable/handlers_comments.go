@@ -148,7 +148,7 @@ func (a *App) createAnswerComment(w http.ResponseWriter, r *http.Request, answer
 func (a *App) commentsForAnswer(ctx context.Context, answerID string, page paginationParams) ([]map[string]any, bool, error) {
 	rows, err := a.db.QueryContext(ctx, `
 		SELECT c.id, c.answer_id, c.reply_to_comment_id, c.body, c.mentions_json, c.created_at,
-			u.id, u.display_name
+			u.id, u.display_name, u.avatar_object_key
 		FROM answer_comments c
 		JOIN users u ON u.id = c.author_user_id
 		WHERE c.answer_id = $1 AND c.deleted_at IS NULL
@@ -162,7 +162,7 @@ func (a *App) commentsForAnswer(ctx context.Context, answerID string, page pagin
 
 	comments := []map[string]any{}
 	for rows.Next() {
-		comment, err := scanAnswerComment(rows)
+		comment, err := a.scanAnswerComment(rows)
 		if err != nil {
 			return nil, false, err
 		}
@@ -179,10 +179,10 @@ type answerCommentScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanAnswerComment(scanner answerCommentScanner) (map[string]any, error) {
-	var commentID, answerID, body, mentionsRaw, createdAt, authorID, authorName string
+func (a *App) scanAnswerComment(scanner answerCommentScanner) (map[string]any, error) {
+	var commentID, answerID, body, mentionsRaw, createdAt, authorID, authorName, authorAvatarObjectKey string
 	var replyToCommentID sql.NullString
-	if err := scanner.Scan(&commentID, &answerID, &replyToCommentID, &body, &mentionsRaw, &createdAt, &authorID, &authorName); err != nil {
+	if err := scanner.Scan(&commentID, &answerID, &replyToCommentID, &body, &mentionsRaw, &createdAt, &authorID, &authorName, &authorAvatarObjectKey); err != nil {
 		return nil, err
 	}
 	var replyTo any
@@ -196,22 +196,19 @@ func scanAnswerComment(scanner answerCommentScanner) (map[string]any, error) {
 		"body":                body,
 		"mentions":            decodeStringList(mentionsRaw),
 		"created_at":          createdAt,
-		"author": map[string]any{
-			"id":           authorID,
-			"display_name": authorName,
-		},
+		"author":              a.userIdentityResponse(authorID, authorName, authorAvatarObjectKey),
 	}, nil
 }
 
 func (a *App) commentByID(ctx context.Context, commentID string) (map[string]any, error) {
 	row := a.db.QueryRowContext(ctx, `
 		SELECT c.id, c.answer_id, c.reply_to_comment_id, c.body, c.mentions_json, c.created_at,
-			u.id, u.display_name
+			u.id, u.display_name, u.avatar_object_key
 		FROM answer_comments c
 		JOIN users u ON u.id = c.author_user_id
 		WHERE c.id = $1 AND c.deleted_at IS NULL
 	`, commentID)
-	return scanAnswerComment(row)
+	return a.scanAnswerComment(row)
 }
 
 func (a *App) ensureReplyCommentBelongsToAnswer(ctx context.Context, answerID string, commentID string) error {

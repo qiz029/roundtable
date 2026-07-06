@@ -19,10 +19,11 @@ type monthlyScorePeriod struct {
 }
 
 type agentScoreInfo struct {
-	ID        string
-	Name      string
-	OwnerID   string
-	OwnerName string
+	ID              string
+	Name            string
+	AvatarObjectKey string
+	OwnerID         string
+	OwnerName       string
 }
 
 type scoredAnswer struct {
@@ -249,7 +250,7 @@ func (a *App) calculateMonthlyScores(ctx context.Context, period monthlyScorePer
 
 func (a *App) loadScoreAgents(ctx context.Context) (map[string]agentScoreInfo, error) {
 	rows, err := a.db.QueryContext(ctx, `
-		SELECT ag.id, ag.name, ag.owner_user_id, owner.display_name
+		SELECT ag.id, ag.name, ag.avatar_object_key, ag.owner_user_id, owner.display_name
 		FROM agents ag
 		JOIN users owner ON owner.id = ag.owner_user_id
 	`)
@@ -261,7 +262,7 @@ func (a *App) loadScoreAgents(ctx context.Context) (map[string]agentScoreInfo, e
 	agents := map[string]agentScoreInfo{}
 	for rows.Next() {
 		var info agentScoreInfo
-		if err := rows.Scan(&info.ID, &info.Name, &info.OwnerID, &info.OwnerName); err != nil {
+		if err := rows.Scan(&info.ID, &info.Name, &info.AvatarObjectKey, &info.OwnerID, &info.OwnerName); err != nil {
 			return nil, err
 		}
 		agents[info.ID] = info
@@ -592,7 +593,7 @@ func (a *App) writeAgentLeaderboard(w http.ResponseWriter, r *http.Request, peri
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT s.agent_id, ag.name, s.owner_user_id, owner.display_name,
+		SELECT s.agent_id, ag.name, ag.avatar_object_key, s.owner_user_id, owner.display_name,
 			s.answer_score, s.curation_score, s.reliability_score, s.penalty_score,
 			s.total_score, s.rank, s.details_json
 		FROM agent_monthly_scores s
@@ -610,7 +611,7 @@ func (a *App) writeAgentLeaderboard(w http.ResponseWriter, r *http.Request, peri
 
 	items := []map[string]any{}
 	for rows.Next() {
-		item, err := scanAgentScore(rows, period)
+		item, err := a.scanAgentScore(rows, period)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -637,7 +638,7 @@ func (a *App) writeUserLeaderboard(w http.ResponseWriter, r *http.Request, perio
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT s.user_id, u.display_name, s.owned_agent_score, s.operator_bonus,
+		SELECT s.user_id, u.display_name, u.avatar_object_key, s.owned_agent_score, s.operator_bonus,
 			s.penalty_score, s.total_score, s.rank, s.details_json
 		FROM user_monthly_scores s
 		JOIN users u ON u.id = s.user_id
@@ -653,7 +654,7 @@ func (a *App) writeUserLeaderboard(w http.ResponseWriter, r *http.Request, perio
 
 	items := []map[string]any{}
 	for rows.Next() {
-		item, err := scanUserScore(rows, period)
+		item, err := a.scanUserScore(rows, period)
 		if err != nil {
 			writeError(w, err)
 			return
@@ -702,7 +703,7 @@ func (a *App) writeMyRewards(w http.ResponseWriter, r *http.Request, period stri
 
 func (a *App) agentScoreResponse(ctx context.Context, period string, agentID string) (map[string]any, error) {
 	row := a.db.QueryRowContext(ctx, `
-		SELECT s.agent_id, ag.name, s.owner_user_id, owner.display_name,
+		SELECT s.agent_id, ag.name, ag.avatar_object_key, s.owner_user_id, owner.display_name,
 			s.answer_score, s.curation_score, s.reliability_score, s.penalty_score,
 			s.total_score, s.rank, s.details_json
 		FROM agent_monthly_scores s
@@ -710,29 +711,29 @@ func (a *App) agentScoreResponse(ctx context.Context, period string, agentID str
 		JOIN users owner ON owner.id = s.owner_user_id
 		WHERE s.period = $1 AND s.agent_id = $2
 	`, period, agentID)
-	return scanAgentScore(row, period)
+	return a.scanAgentScore(row, period)
 }
 
 func (a *App) userScoreResponse(ctx context.Context, period string, userID string) (map[string]any, error) {
 	row := a.db.QueryRowContext(ctx, `
-		SELECT s.user_id, u.display_name, s.owned_agent_score, s.operator_bonus,
+		SELECT s.user_id, u.display_name, u.avatar_object_key, s.owned_agent_score, s.operator_bonus,
 			s.penalty_score, s.total_score, s.rank, s.details_json
 		FROM user_monthly_scores s
 		JOIN users u ON u.id = s.user_id
 		WHERE s.period = $1 AND s.user_id = $2
 	`, period, userID)
-	return scanUserScore(row, period)
+	return a.scanUserScore(row, period)
 }
 
 type scoreScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanAgentScore(row scoreScanner, period string) (map[string]any, error) {
-	var agentID, agentName, ownerID, ownerName, detailsRaw string
+func (a *App) scanAgentScore(row scoreScanner, period string) (map[string]any, error) {
+	var agentID, agentName, agentAvatarObjectKey, ownerID, ownerName, detailsRaw string
 	var answerScore, curationScore, reliabilityScore, penaltyScore, totalScore float64
 	var rank int
-	if err := row.Scan(&agentID, &agentName, &ownerID, &ownerName, &answerScore, &curationScore,
+	if err := row.Scan(&agentID, &agentName, &agentAvatarObjectKey, &ownerID, &ownerName, &answerScore, &curationScore,
 		&reliabilityScore, &penaltyScore, &totalScore, &rank, &detailsRaw); err != nil {
 		return nil, err
 	}
@@ -740,8 +741,9 @@ func scanAgentScore(row scoreScanner, period string) (map[string]any, error) {
 		"period": period,
 		"rank":   rank,
 		"agent": map[string]any{
-			"id":   agentID,
-			"name": agentName,
+			"id":         agentID,
+			"name":       agentName,
+			"avatar_url": a.avatarURL(agentAvatarObjectKey),
 			"owner": map[string]any{
 				"id":           ownerID,
 				"display_name": ownerName,
@@ -756,11 +758,11 @@ func scanAgentScore(row scoreScanner, period string) (map[string]any, error) {
 	}, nil
 }
 
-func scanUserScore(row scoreScanner, period string) (map[string]any, error) {
-	var userID, displayName, detailsRaw string
+func (a *App) scanUserScore(row scoreScanner, period string) (map[string]any, error) {
+	var userID, displayName, avatarObjectKey, detailsRaw string
 	var ownedAgentScore, operatorBonus, penaltyScore, totalScore float64
 	var rank int
-	if err := row.Scan(&userID, &displayName, &ownedAgentScore, &operatorBonus,
+	if err := row.Scan(&userID, &displayName, &avatarObjectKey, &ownedAgentScore, &operatorBonus,
 		&penaltyScore, &totalScore, &rank, &detailsRaw); err != nil {
 		return nil, err
 	}
@@ -770,6 +772,7 @@ func scanUserScore(row scoreScanner, period string) (map[string]any, error) {
 		"user": map[string]any{
 			"id":           userID,
 			"display_name": displayName,
+			"avatar_url":   a.avatarURL(avatarObjectKey),
 		},
 		"owned_agent_score": ownedAgentScore,
 		"operator_bonus":    operatorBonus,

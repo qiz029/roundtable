@@ -3,6 +3,7 @@ package roundtable
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"strings"
@@ -58,6 +59,10 @@ func (a *App) handleMyAgent(w http.ResponseWriter, r *http.Request) {
 		a.resetAgentToken(w, r, user, parts[0])
 		return
 	}
+	if len(parts) == 2 && parts[0] != "" && parts[1] == "avatar" {
+		a.handleMyAgentAvatar(w, r, user, parts[0])
+		return
+	}
 	writeError(w, errNotFound("agent action not found"))
 }
 
@@ -68,14 +73,15 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request, user currentUs
 	}
 
 	var req struct {
-		Name         string   `json:"name"`
-		Description  string   `json:"description"`
-		Tags         []string `json:"tags"`
-		Capabilities []string `json:"capabilities"`
-		Instructions string   `json:"instructions"`
-		HomepageURL  string   `json:"homepage_url"`
-		IsPublic     bool     `json:"is_public"`
-		Status       string   `json:"status"`
+		Name         string          `json:"name"`
+		Description  string          `json:"description"`
+		AvatarURL    json.RawMessage `json:"avatar_url"`
+		Tags         []string        `json:"tags"`
+		Capabilities []string        `json:"capabilities"`
+		Instructions string          `json:"instructions"`
+		HomepageURL  string          `json:"homepage_url"`
+		IsPublic     bool            `json:"is_public"`
+		Status       string          `json:"status"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err)
@@ -84,6 +90,10 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request, user currentUs
 	name := strings.TrimSpace(req.Name)
 	if name == "" {
 		writeError(w, errInvalidInput("name is required"))
+		return
+	}
+	if len(req.AvatarURL) > 0 {
+		writeError(w, errInvalidInput("avatar_url is managed by avatar upload endpoints"))
 		return
 	}
 	tags, err := encodeStringList(req.Tags)
@@ -136,7 +146,7 @@ func (a *App) createAgent(w http.ResponseWriter, r *http.Request, user currentUs
 		return
 	}
 
-	resp := agentProfileResponse(ownedAgentProfile{
+	resp := a.agentProfileResponse(ownedAgentProfile{
 		ID:              agentID,
 		Name:            name,
 		Description:     strings.TrimSpace(req.Description),
@@ -169,7 +179,8 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 		return
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
-		SELECT id, name, description, tags_json, capabilities_json,
+		SELECT id, name, description, avatar_object_key, avatar_content_type, avatar_updated_at,
+			tags_json, capabilities_json,
 			instructions, homepage_url, is_public, status, created_at
 		FROM agents
 		WHERE owner_user_id = $1
@@ -185,13 +196,14 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 	items := []map[string]any{}
 	for rows.Next() {
 		var profile ownedAgentProfile
-		if err := rows.Scan(&profile.ID, &profile.Name, &profile.Description, &profile.TagsRaw,
+		if err := rows.Scan(&profile.ID, &profile.Name, &profile.Description,
+			&profile.AvatarObjectKey, &profile.AvatarContentType, &profile.AvatarUpdatedAt, &profile.TagsRaw,
 			&profile.CapabilitiesRaw, &profile.Instructions, &profile.HomepageURL,
 			&profile.IsPublic, &profile.Status, &profile.CreatedAt); err != nil {
 			writeError(w, err)
 			return
 		}
-		items = append(items, agentProfileResponse(profile))
+		items = append(items, a.agentProfileResponse(profile))
 	}
 	items, hasMore := trimPaginatedItems(items, page)
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -203,16 +215,19 @@ func (a *App) listMyAgents(w http.ResponseWriter, r *http.Request, user currentU
 }
 
 type ownedAgentProfile struct {
-	ID              string
-	Name            string
-	Description     string
-	TagsRaw         string
-	CapabilitiesRaw string
-	Instructions    string
-	HomepageURL     string
-	IsPublic        bool
-	Status          string
-	CreatedAt       string
+	ID                string
+	Name              string
+	Description       string
+	AvatarObjectKey   string
+	AvatarContentType string
+	AvatarUpdatedAt   sql.NullString
+	TagsRaw           string
+	CapabilitiesRaw   string
+	Instructions      string
+	HomepageURL       string
+	IsPublic          bool
+	Status            string
+	CreatedAt         string
 }
 
 func (a *App) getMyAgent(w http.ResponseWriter, r *http.Request, user currentUser, agentID string) {
@@ -225,7 +240,7 @@ func (a *App) getMyAgent(w http.ResponseWriter, r *http.Request, user currentUse
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, agentProfileResponse(profile))
+	writeJSON(w, http.StatusOK, a.agentProfileResponse(profile))
 }
 
 func (a *App) updateAgentProfile(w http.ResponseWriter, r *http.Request, user currentUser, agentID string) {
@@ -240,14 +255,15 @@ func (a *App) updateAgentProfile(w http.ResponseWriter, r *http.Request, user cu
 	}
 
 	var req struct {
-		Name         *string  `json:"name"`
-		Description  *string  `json:"description"`
-		Tags         []string `json:"tags"`
-		Capabilities []string `json:"capabilities"`
-		Instructions *string  `json:"instructions"`
-		HomepageURL  *string  `json:"homepage_url"`
-		IsPublic     *bool    `json:"is_public"`
-		Status       *string  `json:"status"`
+		Name         *string         `json:"name"`
+		Description  *string         `json:"description"`
+		AvatarURL    json.RawMessage `json:"avatar_url"`
+		Tags         []string        `json:"tags"`
+		Capabilities []string        `json:"capabilities"`
+		Instructions *string         `json:"instructions"`
+		HomepageURL  *string         `json:"homepage_url"`
+		IsPublic     *bool           `json:"is_public"`
+		Status       *string         `json:"status"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err)
@@ -264,6 +280,10 @@ func (a *App) updateAgentProfile(w http.ResponseWriter, r *http.Request, user cu
 	}
 	if req.Description != nil {
 		profile.Description = strings.TrimSpace(*req.Description)
+	}
+	if len(req.AvatarURL) > 0 {
+		writeError(w, errInvalidInput("avatar_url is managed by avatar upload endpoints"))
+		return
 	}
 	if req.Tags != nil {
 		tags, err := encodeStringList(req.Tags)
@@ -322,27 +342,30 @@ func (a *App) updateAgentProfile(w http.ResponseWriter, r *http.Request, user cu
 		return
 	}
 
-	writeJSON(w, http.StatusOK, agentProfileResponse(profile))
+	writeJSON(w, http.StatusOK, a.agentProfileResponse(profile))
 }
 
 func (a *App) ownedAgentProfile(ctx context.Context, ownerUserID string, agentID string) (ownedAgentProfile, error) {
 	var profile ownedAgentProfile
 	err := a.db.QueryRowContext(ctx, `
-		SELECT id, name, description, tags_json, capabilities_json,
+		SELECT id, name, description, avatar_object_key, avatar_content_type, avatar_updated_at,
+			tags_json, capabilities_json,
 			instructions, homepage_url, is_public, status, created_at
 		FROM agents
 		WHERE id = $1 AND owner_user_id = $2
 	`, agentID, ownerUserID).Scan(&profile.ID, &profile.Name, &profile.Description,
+		&profile.AvatarObjectKey, &profile.AvatarContentType, &profile.AvatarUpdatedAt,
 		&profile.TagsRaw, &profile.CapabilitiesRaw, &profile.Instructions,
 		&profile.HomepageURL, &profile.IsPublic, &profile.Status, &profile.CreatedAt)
 	return profile, err
 }
 
-func agentProfileResponse(profile ownedAgentProfile) map[string]any {
+func (a *App) agentProfileResponse(profile ownedAgentProfile) map[string]any {
 	return map[string]any{
 		"id":           profile.ID,
 		"name":         profile.Name,
 		"description":  profile.Description,
+		"avatar_url":   a.avatarURL(profile.AvatarObjectKey),
 		"tags":         decodeStringList(profile.TagsRaw),
 		"capabilities": decodeStringList(profile.CapabilitiesRaw),
 		"instructions": profile.Instructions,

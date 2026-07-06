@@ -17,19 +17,22 @@ type socialLink struct {
 }
 
 type userProfile struct {
-	ID             string
-	Email          string
-	DisplayName    string
-	FullName       string
-	Bio            string
-	Background     string
-	AvatarURL      string
-	WebsiteURL     string
-	SocialLinksRaw string
-	IsSeedUser     bool
-	EmailVerified  bool
-	FollowerCount  int
-	FollowingCount int
+	ID                string
+	Email             string
+	DisplayName       string
+	FullName          string
+	Bio               string
+	Background        string
+	AvatarURL         string
+	AvatarObjectKey   string
+	AvatarContentType string
+	AvatarUpdatedAt   sql.NullString
+	WebsiteURL        string
+	SocialLinksRaw    string
+	IsSeedUser        bool
+	EmailVerified     bool
+	FollowerCount     int
+	FollowingCount    int
 }
 
 type userProfileScanner interface {
@@ -94,7 +97,7 @@ func (a *App) getMyProfile(w http.ResponseWriter, r *http.Request, user currentU
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, privateUserProfileResponse(profile))
+	writeJSON(w, http.StatusOK, a.privateUserProfileResponse(profile))
 }
 
 func (a *App) getPublicProfile(w http.ResponseWriter, r *http.Request, userID string) {
@@ -112,7 +115,7 @@ func (a *App) getPublicProfile(w http.ResponseWriter, r *http.Request, userID st
 		writeError(w, err)
 		return
 	}
-	resp := publicUserProfileResponse(profile)
+	resp := a.publicUserProfileResponse(profile)
 	resp["viewer_following"] = viewerFollowing
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -125,13 +128,13 @@ func (a *App) updateMyProfile(w http.ResponseWriter, r *http.Request, user curre
 	}
 
 	var req struct {
-		DisplayName *string      `json:"display_name"`
-		FullName    *string      `json:"full_name"`
-		Bio         *string      `json:"bio"`
-		Background  *string      `json:"background"`
-		AvatarURL   *string      `json:"avatar_url"`
-		WebsiteURL  *string      `json:"website_url"`
-		SocialLinks []socialLink `json:"social_links"`
+		DisplayName *string         `json:"display_name"`
+		FullName    *string         `json:"full_name"`
+		Bio         *string         `json:"bio"`
+		Background  *string         `json:"background"`
+		AvatarURL   json.RawMessage `json:"avatar_url"`
+		WebsiteURL  *string         `json:"website_url"`
+		SocialLinks []socialLink    `json:"social_links"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err)
@@ -155,8 +158,9 @@ func (a *App) updateMyProfile(w http.ResponseWriter, r *http.Request, user curre
 	if req.Background != nil {
 		profile.Background = strings.TrimSpace(*req.Background)
 	}
-	if req.AvatarURL != nil {
-		profile.AvatarURL = strings.TrimSpace(*req.AvatarURL)
+	if len(req.AvatarURL) > 0 {
+		writeError(w, errInvalidInput("avatar_url is managed by avatar upload endpoints"))
+		return
 	}
 	if req.WebsiteURL != nil {
 		profile.WebsiteURL = strings.TrimSpace(*req.WebsiteURL)
@@ -176,17 +180,17 @@ func (a *App) updateMyProfile(w http.ResponseWriter, r *http.Request, user curre
 			full_name = $2,
 			bio = $3,
 			background = $4,
-			avatar_url = $5,
-			website_url = $6,
-			social_links_json = $7
-		WHERE id = $8
+			avatar_url = '',
+			website_url = $5,
+			social_links_json = $6
+		WHERE id = $7
 	`, profile.DisplayName, profile.FullName, profile.Bio, profile.Background,
-		profile.AvatarURL, profile.WebsiteURL, profile.SocialLinksRaw, profile.ID); err != nil {
+		profile.WebsiteURL, profile.SocialLinksRaw, profile.ID); err != nil {
 		writeError(w, err)
 		return
 	}
 
-	writeJSON(w, http.StatusOK, privateUserProfileResponse(profile))
+	writeJSON(w, http.StatusOK, a.privateUserProfileResponse(profile))
 }
 
 func (a *App) handleUserFollow(w http.ResponseWriter, r *http.Request, followeeUserID string) {
@@ -240,7 +244,8 @@ func (a *App) listUserFollowers(w http.ResponseWriter, r *http.Request, userID s
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
-			u.avatar_url, u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
+			u.avatar_url, u.avatar_object_key, u.avatar_content_type, u.avatar_updated_at,
+			u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM user_follows f
@@ -255,7 +260,7 @@ func (a *App) listUserFollowers(w http.ResponseWriter, r *http.Request, userID s
 	}
 	defer rows.Close()
 
-	items, err := scanPublicUserProfiles(rows)
+	items, err := a.scanPublicUserProfiles(rows)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -279,7 +284,8 @@ func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID s
 	}
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
-			u.avatar_url, u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
+			u.avatar_url, u.avatar_object_key, u.avatar_content_type, u.avatar_updated_at,
+			u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM user_follows f
@@ -294,7 +300,7 @@ func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID s
 	}
 	defer rows.Close()
 
-	items, err := scanPublicUserProfiles(rows)
+	items, err := a.scanPublicUserProfiles(rows)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -309,7 +315,8 @@ func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID s
 func (a *App) userProfileByID(ctx context.Context, userID string) (userProfile, error) {
 	row := a.db.QueryRowContext(ctx, `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
-			u.avatar_url, u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
+			u.avatar_url, u.avatar_object_key, u.avatar_content_type, u.avatar_updated_at,
+			u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM users u
@@ -318,14 +325,14 @@ func (a *App) userProfileByID(ctx context.Context, userID string) (userProfile, 
 	return scanUserProfile(row)
 }
 
-func scanPublicUserProfiles(rows *sql.Rows) ([]map[string]any, error) {
+func (a *App) scanPublicUserProfiles(rows *sql.Rows) ([]map[string]any, error) {
 	items := []map[string]any{}
 	for rows.Next() {
 		profile, err := scanUserProfile(rows)
 		if err != nil {
 			return nil, err
 		}
-		items = append(items, publicUserProfileResponse(profile))
+		items = append(items, a.publicUserProfileResponse(profile))
 	}
 	return items, rows.Err()
 }
@@ -334,20 +341,21 @@ func scanUserProfile(scanner userProfileScanner) (userProfile, error) {
 	var profile userProfile
 	var emailVerifiedAt sql.NullString
 	err := scanner.Scan(&profile.ID, &profile.Email, &profile.DisplayName, &profile.FullName,
-		&profile.Bio, &profile.Background, &profile.AvatarURL, &profile.WebsiteURL,
+		&profile.Bio, &profile.Background, &profile.AvatarURL, &profile.AvatarObjectKey,
+		&profile.AvatarContentType, &profile.AvatarUpdatedAt, &profile.WebsiteURL,
 		&profile.SocialLinksRaw, &profile.IsSeedUser, &emailVerifiedAt, &profile.FollowerCount, &profile.FollowingCount)
 	profile.EmailVerified = emailVerifiedAt.Valid
 	return profile, err
 }
 
-func privateUserProfileResponse(profile userProfile) map[string]any {
-	resp := publicUserProfileResponse(profile)
+func (a *App) privateUserProfileResponse(profile userProfile) map[string]any {
+	resp := a.publicUserProfileResponse(profile)
 	resp["email"] = profile.Email
 	resp["email_verified"] = profile.EmailVerified
 	return resp
 }
 
-func publicUserProfileResponse(profile userProfile) map[string]any {
+func (a *App) publicUserProfileResponse(profile userProfile) map[string]any {
 	return map[string]any{
 		"id":              profile.ID,
 		"display_name":    profile.DisplayName,
@@ -355,7 +363,7 @@ func publicUserProfileResponse(profile userProfile) map[string]any {
 		"full_name":       profile.FullName,
 		"bio":             profile.Bio,
 		"background":      profile.Background,
-		"avatar_url":      profile.AvatarURL,
+		"avatar_url":      a.avatarURL(profile.AvatarObjectKey),
 		"website_url":     profile.WebsiteURL,
 		"social_links":    decodeSocialLinks(profile.SocialLinksRaw),
 		"follower_count":  profile.FollowerCount,

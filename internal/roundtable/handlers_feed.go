@@ -38,6 +38,7 @@ type feedAnswer struct {
 	CommentCount          int
 	AgentID               string
 	AgentName             string
+	AgentAvatarObjectKey  string
 	AgentOwnerName        string
 	QuestionAnswerRank    int
 	AnswerImpressionCount int
@@ -313,11 +314,7 @@ func (a *App) listAnswerFeed(w http.ResponseWriter, r *http.Request) {
 				"created_at":    answer.AnswerCreatedAt,
 				"like_count":    answer.LikeCount,
 				"comment_count": answer.CommentCount,
-				"agent": map[string]any{
-					"id":         answer.AgentID,
-					"name":       answer.AgentName,
-					"owner_name": answer.AgentOwnerName,
-				},
+				"agent":         a.agentIdentityResponse(answer.AgentID, answer.AgentName, answer.AgentOwnerName, answer.AgentAvatarObjectKey),
 			},
 			"hot_score":    score,
 			"rank_reasons": reasons,
@@ -418,7 +415,8 @@ func (a *App) feedAnswers(ctx context.Context, userID string) ([]feedAnswer, err
 			SELECT q.id AS question_id, q.title, q.body AS question_body, q.tags_json, q.created_at AS question_created_at,
 				q.author_user_id, question_author.display_name AS question_author_name,
 				ans.id AS answer_id, ans.body AS answer_body, ans.created_at AS answer_created_at,
-				ag.id AS agent_id, ag.name AS agent_name, agent_owner.display_name AS agent_owner_name,
+				ag.id AS agent_id, ag.name AS agent_name, ag.avatar_object_key AS agent_avatar_object_key,
+				agent_owner.display_name AS agent_owner_name,
 				COUNT(*) OVER (PARTITION BY q.id) AS answer_count,
 				COALESCE(SUM(CASE
 					WHEN v.voter_type = 'user' AND v.user_id <> ag.owner_user_id THEN v.value
@@ -438,7 +436,7 @@ func (a *App) feedAnswers(ctx context.Context, userID string) ([]feedAnswer, err
 				AND agent_owner.status = 'active'
 				AND ag.status = 'active'
 			GROUP BY q.id, q.title, q.body, q.tags_json, q.created_at, q.author_user_id, question_author.display_name,
-				ans.id, ans.body, ans.created_at, ag.id, ag.name, ag.owner_user_id, agent_owner.display_name
+				ans.id, ans.body, ans.created_at, ag.id, ag.name, ag.avatar_object_key, ag.owner_user_id, agent_owner.display_name
 		),
 		ranked_answers AS (
 			SELECT *,
@@ -449,7 +447,8 @@ func (a *App) feedAnswers(ctx context.Context, userID string) ([]feedAnswer, err
 			FROM answer_stats
 		)
 		SELECT ra.question_id, ra.title, ra.question_body, ra.tags_json, ra.question_created_at, ra.author_user_id, ra.question_author_name,
-			ra.answer_count, ra.answer_id, ra.answer_body, ra.answer_created_at, ra.like_count, ra.comment_count, ra.agent_id, ra.agent_name, ra.agent_owner_name,
+			ra.answer_count, ra.answer_id, ra.answer_body, ra.answer_created_at, ra.like_count, ra.comment_count,
+			ra.agent_id, ra.agent_name, ra.agent_avatar_object_key, ra.agent_owner_name,
 			ra.question_answer_rank,
 			CASE WHEN $1 <> '' THEN EXISTS (
 				SELECT 1 FROM user_follows f
@@ -494,7 +493,7 @@ func (a *App) feedAnswers(ctx context.Context, userID string) ([]feedAnswer, err
 		if err := rows.Scan(&answer.Question.ID, &answer.Question.Title, &answer.Question.Body, &answer.Question.TagsRaw,
 			&answer.Question.CreatedAt, &answer.Question.AuthorUserID, &answer.Question.AuthorName, &answer.Question.AnswerCount,
 			&answer.AnswerID, &answer.AnswerBody, &answer.AnswerCreatedAt, &answer.LikeCount,
-			&answer.CommentCount, &answer.AgentID, &answer.AgentName, &answer.AgentOwnerName, &answer.QuestionAnswerRank,
+			&answer.CommentCount, &answer.AgentID, &answer.AgentName, &answer.AgentAvatarObjectKey, &answer.AgentOwnerName, &answer.QuestionAnswerRank,
 			&answer.Question.FollowedAuthor, &answer.Question.ImpressionCount, &answer.Question.OpenCount, &answer.Question.DismissCount,
 			&answer.AnswerImpressionCount, &answer.AnswerOpenCount, &answer.AnswerDismissCount); err != nil {
 			return nil, err
