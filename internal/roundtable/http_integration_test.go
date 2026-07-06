@@ -16,6 +16,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -303,6 +304,7 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	assertSelectable(t, db, `SELECT avatar_object_key, avatar_content_type, avatar_updated_at FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT agent_limit FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT is_seed_user FROM users LIMIT 0`)
+	assertSelectable(t, db, `SELECT preferred_language FROM users LIMIT 0`)
 	assertSelectable(t, db, `SELECT instructions, homepage_url FROM agents LIMIT 0`)
 	assertSelectable(t, db, `SELECT avatar_object_key, avatar_content_type, avatar_updated_at FROM agents LIMIT 0`)
 	assertSelectable(t, db, `SELECT answer_id, query, tags_json FROM feed_events LIMIT 0`)
@@ -314,6 +316,8 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	assertSelectable(t, db, `SELECT period, user_id, total_score, rank, details_json FROM user_monthly_scores LIMIT 0`)
 	assertSelectable(t, db, `SELECT answer_id, author_user_id, reply_to_comment_id, mentions_json, deleted_at FROM answer_comments LIMIT 0`)
 	assertSelectable(t, db, `SELECT answer_id, agent_id, body, stance, created_at, updated_at FROM answer_responses LIMIT 0`)
+	assertSelectable(t, db, `SELECT resource_type, resource_id, target_language, source_hash, translation_version FROM content_translations LIMIT 0`)
+	assertSelectable(t, db, `SELECT resource_type, resource_id, target_language, source_hash, status, attempts, last_error FROM translation_jobs LIMIT 0`)
 }
 
 func TestSeedUserMarkerIsExposedAndReadOnly(t *testing.T) {
@@ -444,13 +448,17 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	if got := intField(t, initial, "following_count"); got != 0 {
 		t.Fatalf("initial following_count = %d, want 0", got)
 	}
+	if got := stringField(t, initial, "preferred_language"); got != "en" {
+		t.Fatalf("initial preferred_language = %q, want en", got)
+	}
 
 	updated := patchJSON(t, userClient, server.URL+"/api/v1/me/profile", "", map[string]any{
-		"display_name": "Owner Renamed",
-		"full_name":    "Ada Lovelace",
-		"bio":          "Builds agent collaboration tools.",
-		"background":   "Distributed systems and developer tooling.",
-		"website_url":  "https://example.com",
+		"display_name":       "Owner Renamed",
+		"full_name":          "Ada Lovelace",
+		"bio":                "Builds agent collaboration tools.",
+		"background":         "Distributed systems and developer tooling.",
+		"website_url":        "https://example.com",
+		"preferred_language": "zh-CN",
 		"social_links": []map[string]any{
 			{"label": "GitHub", "url": "https://github.com/example"},
 			{"label": "LinkedIn", "url": "https://linkedin.com/in/example"},
@@ -464,6 +472,9 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	}
 	if got := stringField(t, updated, "background"); got != "Distributed systems and developer tooling." {
 		t.Fatalf("updated background = %q", got)
+	}
+	if got := stringField(t, updated, "preferred_language"); got != "zh-CN" {
+		t.Fatalf("updated preferred_language = %q, want zh-CN", got)
 	}
 	links := listField(t, updated, "social_links")
 	if len(links) != 2 {
@@ -481,6 +492,9 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	if got := stringFieldAllowEmpty(t, me, "avatar_url"); got != "" {
 		t.Fatalf("auth/me avatar_url = %q, want empty", got)
 	}
+	if got := stringField(t, me, "preferred_language"); got != "zh-CN" {
+		t.Fatalf("auth/me preferred_language = %q, want zh-CN", got)
+	}
 
 	public := getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/"+userID+"/profile", "", http.StatusOK)
 	if got := stringField(t, public, "display_name"); got != "Owner Renamed" {
@@ -488,6 +502,9 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	}
 	if _, ok := public["email"]; ok {
 		t.Fatalf("public profile leaked email: %#v", public)
+	}
+	if _, ok := public["preferred_language"]; ok {
+		t.Fatalf("public profile leaked preferred_language: %#v", public)
 	}
 	if got := len(listField(t, public, "social_links")); got != 2 {
 		t.Fatalf("public social_links count = %d, want 2", got)
@@ -508,6 +525,13 @@ func TestUserProfileGetUpdateAndPublicRead(t *testing.T) {
 	}, http.StatusBadRequest)
 	if got := badLink["message"]; got != "social_links entries require label and url" {
 		t.Fatalf("bad social link message = %#v", got)
+	}
+
+	badLanguage := patchJSON(t, userClient, server.URL+"/api/v1/me/profile", "", map[string]any{
+		"preferred_language": "es",
+	}, http.StatusBadRequest)
+	if got := badLanguage["message"]; got != "preferred_language must be en or zh-CN" {
+		t.Fatalf("bad preferred_language message = %#v", got)
 	}
 
 	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/users/usr_missing/profile", "", http.StatusNotFound)
@@ -2638,6 +2662,206 @@ func TestAnswerPagination(t *testing.T) {
 	assertPagination(t, agentAnswers, 2, 2, false, 0)
 }
 
+func TestTranslationCacheAPIAndWorker(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeTranslationProvider{}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:              mailer,
+		TranslationProvider: provider,
+		TranslationWorker: roundtable.TranslationWorkerConfig{
+			BatchSize: 20,
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, userClient, server.URL, mailer, "translation-owner@example.com", "Translation Owner")
+	agentResp := postJSON(t, userClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":        "Translation Agent",
+		"description": "Answers translation test questions.",
+		"is_public":   true,
+	}, http.StatusCreated)
+	agentToken := stringField(t, agentResp, "token")
+
+	question := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "How should translation caching work?",
+		"body":  "Translate the public question without blocking creation.",
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+	answer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", agentToken, map[string]any{
+		"body": "Translate this public answer too.",
+	}, http.StatusCreated)
+	answerID := stringField(t, answer, "id")
+
+	anonymousMiss := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/translations", "", map[string]any{
+		"resource_type":   "question",
+		"resource_id":     questionID,
+		"target_language": "zh-CN",
+	}, http.StatusNotFound)
+	if got := anonymousMiss["message"]; got != "translation not found" {
+		t.Fatalf("anonymous miss message = %#v", got)
+	}
+
+	pending := postJSON(t, userClient, server.URL+"/api/v1/translations", "", map[string]any{
+		"resource_type":   "question",
+		"resource_id":     questionID,
+		"target_language": "zh-CN",
+	}, http.StatusAccepted)
+	if got := stringField(t, pending, "status"); got != "pending" {
+		t.Fatalf("pending status = %q", got)
+	}
+	if got := stringField(t, pending, "target_language"); got != "zh-CN" {
+		t.Fatalf("pending target_language = %q", got)
+	}
+
+	processed, err := app.ProcessTranslationJobs(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("process translations: %v", err)
+	}
+	if processed != 4 {
+		t.Fatalf("processed jobs = %d, want 4", processed)
+	}
+	if got := provider.CallCount(); got != 4 {
+		t.Fatalf("provider call count = %d, want 4", got)
+	}
+
+	ready := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/translations", "", map[string]any{
+		"resource_type":   "question",
+		"resource_id":     questionID,
+		"target_language": "zh-CN",
+	}, http.StatusOK)
+	if got := stringField(t, ready, "status"); got != "ready" {
+		t.Fatalf("ready status = %q", got)
+	}
+	translation := mapField(t, ready, "translation")
+	if got := stringField(t, translation, "title"); got != "[zh-CN] How should translation caching work?" {
+		t.Fatalf("translated title = %q", got)
+	}
+	if got := stringField(t, translation, "body"); got != "[zh-CN] Translate the public question without blocking creation." {
+		t.Fatalf("translated body = %q", got)
+	}
+	if got := stringField(t, ready, "provider"); got != "fake" {
+		t.Fatalf("provider = %q, want fake", got)
+	}
+
+	answerReady := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/translations", "", map[string]any{
+		"resource_type":   "answer",
+		"resource_id":     answerID,
+		"target_language": "en",
+	}, http.StatusOK)
+	answerTranslation := mapField(t, answerReady, "translation")
+	if got := stringFieldAllowEmpty(t, answerTranslation, "title"); got != "" {
+		t.Fatalf("answer translated title = %q, want empty", got)
+	}
+	if got := stringField(t, answerTranslation, "body"); got != "[en] Translate this public answer too." {
+		t.Fatalf("answer translated body = %q", got)
+	}
+
+	processedAgain, err := app.ProcessTranslationJobs(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("process translations again: %v", err)
+	}
+	if processedAgain != 0 {
+		t.Fatalf("processed duplicate jobs = %d, want 0", processedAgain)
+	}
+	if got := provider.CallCount(); got != 4 {
+		t.Fatalf("provider call count after cache hit = %d, want 4", got)
+	}
+}
+
+func TestTranslationWorkerFailureAndBudgetDoNotBreakReads(t *testing.T) {
+	t.Parallel()
+
+	failingProvider := &fakeTranslationProvider{err: errors.New("provider down")}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:              mailer,
+		TranslationProvider: failingProvider,
+		TranslationWorker: roundtable.TranslationWorkerConfig{
+			BatchSize:      10,
+			MaxAttempts:    1,
+			RetryBaseDelay: time.Second,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	userClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, userClient, server.URL, mailer, "translation-failure-owner@example.com", "Translation Failure Owner")
+	question := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Will failed translation break reads?",
+		"body":  "Normal question reads should continue.",
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+
+	processed, err := app.ProcessTranslationJobs(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("process failing translations: %v", err)
+	}
+	if processed != 2 {
+		t.Fatalf("processed failing jobs = %d, want 2", processed)
+	}
+	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK)
+	postJSON(t, newHTTPClient(t), server.URL+"/api/v1/translations", "", map[string]any{
+		"resource_type":   "question",
+		"resource_id":     questionID,
+		"target_language": "zh-CN",
+	}, http.StatusNotFound)
+
+	budgetProvider := &fakeTranslationProvider{}
+	budgetMailer := roundtable.NewMemoryMailer()
+	budgetApp, err := newTestApp(t, roundtable.Options{
+		Mailer:              budgetMailer,
+		TranslationProvider: budgetProvider,
+		TranslationWorker: roundtable.TranslationWorkerConfig{
+			BatchSize:           10,
+			DailyBudgetMicros:   1,
+			EstimatedCostMicros: 2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new budget app: %v", err)
+	}
+	defer budgetApp.Close()
+	budgetServer := httptest.NewServer(budgetApp.Handler())
+	defer budgetServer.Close()
+
+	budgetClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, budgetClient, budgetServer.URL, budgetMailer, "translation-budget-owner@example.com", "Translation Budget Owner")
+	budgetQuestion := postJSON(t, budgetClient, budgetServer.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Will budget block provider calls?",
+		"body":  "Budget exhaustion should keep reads healthy.",
+	}, http.StatusCreated)
+	budgetQuestionID := stringField(t, budgetQuestion, "id")
+
+	budgetProcessed, err := budgetApp.ProcessTranslationJobs(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("process budget translations: %v", err)
+	}
+	if budgetProcessed != 2 {
+		t.Fatalf("budget processed jobs = %d, want 2 deferred jobs", budgetProcessed)
+	}
+	if got := budgetProvider.CallCount(); got != 0 {
+		t.Fatalf("budget provider call count = %d, want 0", got)
+	}
+	getJSON(t, newHTTPClient(t), budgetServer.URL+"/api/v1/questions/"+budgetQuestionID, "", http.StatusOK)
+}
+
 func TestQuestionSearchBackfillsExistingQuestions(t *testing.T) {
 	t.Parallel()
 
@@ -3733,4 +3957,38 @@ func assertAnswerFeedCommentCount(t *testing.T, feed map[string]any, answerID st
 		}
 	}
 	t.Fatalf("answer %s was not present in answer feed", answerID)
+}
+
+type fakeTranslationProvider struct {
+	mu    sync.Mutex
+	calls int
+	err   error
+}
+
+func (p *fakeTranslationProvider) Translate(_ context.Context, req roundtable.TranslationProviderRequest) (roundtable.TranslationProviderResult, error) {
+	p.mu.Lock()
+	p.calls++
+	p.mu.Unlock()
+	if p.err != nil {
+		return roundtable.TranslationProviderResult{}, p.err
+	}
+	title := ""
+	if req.Title != "" {
+		title = "[" + req.TargetLanguage + "] " + req.Title
+	}
+	return roundtable.TranslationProviderResult{
+		Title:        title,
+		Body:         "[" + req.TargetLanguage + "] " + req.Body,
+		Provider:     "fake",
+		Model:        "fake-translation",
+		InputTokens:  11,
+		OutputTokens: 13,
+		CostMicros:   17,
+	}, nil
+}
+
+func (p *fakeTranslationProvider) CallCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.calls
 }

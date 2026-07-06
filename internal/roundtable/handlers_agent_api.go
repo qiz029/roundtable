@@ -316,6 +316,7 @@ func (a *App) createAnswer(w http.ResponseWriter, r *http.Request, agent current
 			UPDATE invitations SET answered_at = $1 WHERE id = $2
 		`, now.Format(time.RFC3339Nano), validInvitationID)
 	}
+	a.enqueueTranslationJobsBestEffort(r.Context(), "answer", answerID)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":                       answerID,

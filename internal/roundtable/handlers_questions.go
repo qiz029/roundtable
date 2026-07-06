@@ -88,6 +88,7 @@ func (a *App) createQuestion(w http.ResponseWriter, r *http.Request, user curren
 		writeError(w, err)
 		return
 	}
+	a.enqueueTranslationJobsBestEffort(r.Context(), "question", questionID)
 
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"id":               questionID,
