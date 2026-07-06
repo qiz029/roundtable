@@ -58,7 +58,10 @@ func fatal(logger *slog.Logger, message string, err error) {
 }
 
 func newAvatarStoreFromEnv(getenv func(string) string) (roundtable.AvatarStore, string, string, error) {
-	publicBaseURL := strings.TrimRight(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_PUBLIC_BASE_URL")), "/")
+	publicBaseURL := ""
+	if envBoolValue(getenv("ROUNDTABLE_AVATAR_DIRECT_PUBLIC_URLS")) {
+		publicBaseURL = strings.TrimRight(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_PUBLIC_BASE_URL")), "/")
+	}
 	mediaBaseURL := strings.TrimRight(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_MEDIA_BASE_URL")), "/")
 	switch strings.ToLower(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_STORE"))) {
 	case "", "disabled":

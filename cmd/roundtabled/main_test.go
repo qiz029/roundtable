@@ -81,6 +81,47 @@ func TestNewAvatarStoreFromEnvConfiguresLocalStore(t *testing.T) {
 	}
 }
 
+func TestNewAvatarStoreFromEnvRequiresExplicitDirectPublicURLs(t *testing.T) {
+	store, publicBaseURL, mediaBaseURL, err := newAvatarStoreFromEnv(mapLookup(map[string]string{
+		"ROUNDTABLE_AVATAR_STORE":                "s3",
+		"ROUNDTABLE_AVATAR_S3_ENDPOINT":          "https://objects.example.com",
+		"ROUNDTABLE_AVATAR_S3_REGION":            "us-west-2",
+		"ROUNDTABLE_AVATAR_S3_BUCKET":            "roundtable-avatars",
+		"ROUNDTABLE_AVATAR_S3_ACCESS_KEY_ID":     "test-access-key",
+		"ROUNDTABLE_AVATAR_S3_SECRET_ACCESS_KEY": "test-secret-key",
+		"ROUNDTABLE_AVATAR_PUBLIC_BASE_URL":      "https://roundtable.example.com/avatars",
+	}))
+	if err != nil {
+		t.Fatalf("new avatar store from env: %v", err)
+	}
+	if _, ok := store.(*roundtable.S3AvatarStore); !ok {
+		t.Fatalf("store = %T, want *roundtable.S3AvatarStore", store)
+	}
+	if publicBaseURL != "" {
+		t.Fatalf("public base URL = %q, want ignored unless direct public URLs are enabled", publicBaseURL)
+	}
+	if mediaBaseURL != "" {
+		t.Fatalf("media base URL = %q, want empty", mediaBaseURL)
+	}
+
+	_, publicBaseURL, _, err = newAvatarStoreFromEnv(mapLookup(map[string]string{
+		"ROUNDTABLE_AVATAR_STORE":                "s3",
+		"ROUNDTABLE_AVATAR_S3_ENDPOINT":          "https://objects.example.com",
+		"ROUNDTABLE_AVATAR_S3_REGION":            "us-west-2",
+		"ROUNDTABLE_AVATAR_S3_BUCKET":            "roundtable-avatars",
+		"ROUNDTABLE_AVATAR_S3_ACCESS_KEY_ID":     "test-access-key",
+		"ROUNDTABLE_AVATAR_S3_SECRET_ACCESS_KEY": "test-secret-key",
+		"ROUNDTABLE_AVATAR_PUBLIC_BASE_URL":      "https://cdn.example.com/avatars/",
+		"ROUNDTABLE_AVATAR_DIRECT_PUBLIC_URLS":   "true",
+	}))
+	if err != nil {
+		t.Fatalf("new avatar store from env with direct public URLs: %v", err)
+	}
+	if publicBaseURL != "https://cdn.example.com/avatars" {
+		t.Fatalf("public base URL = %q, want trimmed configured URL", publicBaseURL)
+	}
+}
+
 func mapLookup(values map[string]string) func(string) string {
 	return func(name string) string {
 		return values[name]

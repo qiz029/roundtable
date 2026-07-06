@@ -77,7 +77,8 @@ The script builds the service and Postgres images, starts `postgres` and `roundt
 | `ROUNDTABLE_AVATAR_STORE` | `local` in Docker Compose, disabled otherwise | Avatar object store mode: `local`, `s3`, or `disabled`. |
 | `ROUNDTABLE_AVATAR_LOCAL_DIR` | `/app/data/avatars` in Docker Compose, `data/avatars` in local mode otherwise | Local filesystem avatar storage path. |
 | `ROUNDTABLE_AVATAR_MEDIA_BASE_URL` | empty | Optional public origin for backend-served media URLs, for example `https://roundtable.example.com`. |
-| `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL` | empty | Optional public object-store/CDN base URL for direct object reads. Prefer `ROUNDTABLE_AVATAR_MEDIA_BASE_URL` when serving through the backend route. |
+| `ROUNDTABLE_AVATAR_DIRECT_PUBLIC_URLS` | false | Return direct public object-store/CDN URLs instead of backend media URLs. Only enable when that public path is actually routed to avatar objects. |
+| `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL` | empty | Public object-store/CDN base URL used only when `ROUNDTABLE_AVATAR_DIRECT_PUBLIC_URLS=true`. Prefer `ROUNDTABLE_AVATAR_MEDIA_BASE_URL` when serving through the backend route. |
 
 With `ROUNDTABLE_MAILER=auto`, `roundtabled` uses Mailgun when any Mailgun config is present, then SMTP when any SMTP config is present, and otherwise the log mailer. If a provider is selected explicitly, missing required provider config fails server startup.
 
@@ -200,7 +201,8 @@ Configure avatar storage with environment variables:
 - `ROUNDTABLE_AVATAR_STORE=local|s3|disabled`
 - `ROUNDTABLE_AVATAR_LOCAL_DIR`: local filesystem storage path for `local` mode. Defaults to `data/avatars`.
 - `ROUNDTABLE_AVATAR_MEDIA_BASE_URL`: optional public origin for backend-served media URLs. If set to `https://roundtable.example.com`, `avatar_url` uses `https://roundtable.example.com/api/v1/media/avatars/{avatar_id}`.
-- `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL`: optional public object-store/CDN base URL generated into `avatar_url` for direct object reads in `s3` mode. Local filesystem storage always uses the backend media route.
+- `ROUNDTABLE_AVATAR_DIRECT_PUBLIC_URLS`: set to `true` only when the public object-store/CDN route is configured and returns avatar images.
+- `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL`: public object-store/CDN base URL generated into `avatar_url` only when `ROUNDTABLE_AVATAR_DIRECT_PUBLIC_URLS=true`. By default, all storage modes use the backend media route.
 - `ROUNDTABLE_AVATAR_S3_ENDPOINT`, `ROUNDTABLE_AVATAR_S3_REGION`, `ROUNDTABLE_AVATAR_S3_BUCKET`, `ROUNDTABLE_AVATAR_S3_ACCESS_KEY_ID`, `ROUNDTABLE_AVATAR_S3_SECRET_ACCESS_KEY`, `ROUNDTABLE_AVATAR_S3_FORCE_PATH_STYLE`: S3-compatible storage settings.
 
 The Docker image starts as root only long enough to create and chown the local avatar directory, then drops to the `roundtable` user before starting `roundtabled`. This keeps Docker named volumes writable when they are first created as `root:root`.
