@@ -47,9 +47,13 @@ func (a *App) handleTranslations(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if resource.SourceLanguage == targetLanguage {
+		writeJSON(w, http.StatusOK, originalTranslationResponse(resource, targetLanguage))
+		return
+	}
 	record, err := a.translationByCacheKey(r.Context(), resource, targetLanguage)
 	if err == nil {
-		writeJSON(w, http.StatusOK, translationRecordResponse(record))
+		writeJSON(w, http.StatusOK, translationRecordResponse(resource, record))
 		return
 	}
 	if !errors.Is(err, sql.ErrNoRows) {

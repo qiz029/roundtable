@@ -8,6 +8,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode"
 )
 
 const translationVersion = 1
@@ -21,6 +22,7 @@ type TranslationProvider interface {
 type TranslationProviderRequest struct {
 	ResourceType   string
 	ResourceID     string
+	SourceLanguage string
 	TargetLanguage string
 	Title          string
 	Body           string
@@ -48,11 +50,12 @@ type TranslationWorkerConfig struct {
 }
 
 type translatableResource struct {
-	Type       string
-	ID         string
-	Title      string
-	Body       string
-	SourceHash string
+	Type           string
+	ID             string
+	Title          string
+	Body           string
+	SourceLanguage string
+	SourceHash     string
 }
 
 type translationRecord struct {
@@ -116,6 +119,15 @@ func validResourceType(resourceType string) bool {
 	return resourceType == "question" || resourceType == "answer"
 }
 
+func detectTranslationSourceLanguage(title string, body string) string {
+	for _, r := range title + "\n" + body {
+		if unicode.Is(unicode.Han, r) {
+			return "zh-CN"
+		}
+	}
+	return "en"
+}
+
 func (a *App) startTranslationWorker() {
 	if a.translationProvider == nil || !a.translationWorker.Enabled {
 		return
@@ -175,6 +187,7 @@ func (a *App) loadTranslatableResource(ctx context.Context, resourceType string,
 	if err != nil {
 		return translatableResource{}, err
 	}
+	resource.SourceLanguage = detectTranslationSourceLanguage(resource.Title, resource.Body)
 	resource.SourceHash = translationSourceHash(resource.Type, resource.Title, resource.Body)
 	return resource, nil
 }
@@ -206,6 +219,9 @@ func (a *App) enqueueTranslationJob(ctx context.Context, resource translatableRe
 	if !validLanguage(targetLanguage) {
 		return errInvalidInput("target_language must be en or zh-CN")
 	}
+	if resource.SourceLanguage == targetLanguage {
+		return nil
+	}
 	jobID, err := newID("trj")
 	if err != nil {
 		return err
@@ -230,6 +246,9 @@ func (a *App) enqueueTranslationJobsForResource(ctx context.Context, resourceTyp
 		return err
 	}
 	for _, language := range supportedTranslationLanguages {
+		if resource.SourceLanguage == language {
+			continue
+		}
 		if err := a.enqueueTranslationJob(ctx, resource, language); err != nil {
 			return err
 		}
@@ -315,6 +334,13 @@ func (a *App) ProcessTranslationJobs(ctx context.Context, limit int) (int, error
 	if err != nil {
 		return 0, err
 	}
+	if a.translationWorker.MaxConcurrency > 1 && a.translationWorker.DailyBudgetMicros <= 0 {
+		return a.processTranslationJobsConcurrently(ctx, jobs)
+	}
+	return a.processTranslationJobsSequential(ctx, jobs)
+}
+
+func (a *App) processTranslationJobsSequential(ctx context.Context, jobs []translationJob) (int, error) {
 	processed := 0
 	for _, job := range jobs {
 		if err := ctx.Err(); err != nil {
@@ -329,6 +355,57 @@ func (a *App) ProcessTranslationJobs(ctx context.Context, limit int) (int, error
 		}
 	}
 	return processed, nil
+}
+
+func (a *App) processTranslationJobsConcurrently(ctx context.Context, jobs []translationJob) (int, error) {
+	maxConcurrency := a.translationWorker.MaxConcurrency
+	if maxConcurrency > len(jobs) {
+		maxConcurrency = len(jobs)
+	}
+	if maxConcurrency <= 1 {
+		return a.processTranslationJobsSequential(ctx, jobs)
+	}
+
+	type result struct {
+		processed bool
+		err       error
+	}
+	sem := make(chan struct{}, maxConcurrency)
+	results := make(chan result, len(jobs))
+	started := 0
+startJobs:
+	for _, job := range jobs {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		select {
+		case sem <- struct{}{}:
+		case <-ctx.Done():
+			break startJobs
+		}
+		started++
+		go func(job translationJob) {
+			defer func() { <-sem }()
+			didProcess, err := a.processTranslationJob(ctx, job)
+			results <- result{processed: didProcess, err: err}
+		}(job)
+	}
+
+	processed := 0
+	var firstErr error
+	for i := 0; i < started; i++ {
+		result := <-results
+		if result.processed {
+			processed++
+		}
+		if firstErr == nil && result.err != nil {
+			firstErr = result.err
+		}
+	}
+	if firstErr != nil {
+		return processed, firstErr
+	}
+	return processed, ctx.Err()
 }
 
 func (a *App) pendingTranslationJobs(ctx context.Context, limit int) ([]translationJob, error) {
@@ -381,6 +458,9 @@ func (a *App) processTranslationJob(ctx context.Context, job translationJob) (bo
 		}
 		return true, a.failTranslationJob(ctx, job, message)
 	}
+	if resource.SourceLanguage == job.TargetLanguage {
+		return true, a.markTranslationJobSucceeded(ctx, job, TranslationProviderResult{})
+	}
 	if _, err := a.translationByCacheKey(ctx, resource, job.TargetLanguage); err == nil {
 		return true, a.markTranslationJobSucceeded(ctx, job, TranslationProviderResult{})
 	} else if !errors.Is(err, sql.ErrNoRows) {
@@ -395,6 +475,7 @@ func (a *App) processTranslationJob(ctx context.Context, job translationJob) (bo
 	providerResult, err := a.translationProvider.Translate(ctx, TranslationProviderRequest{
 		ResourceType:   resource.Type,
 		ResourceID:     resource.ID,
+		SourceLanguage: resource.SourceLanguage,
 		TargetLanguage: job.TargetLanguage,
 		Title:          resource.Title,
 		Body:           resource.Body,
@@ -517,11 +598,12 @@ func (a *App) translationBudgetAllows(ctx context.Context) (bool, error) {
 	return spent < a.translationWorker.DailyBudgetMicros, nil
 }
 
-func translationRecordResponse(record translationRecord) map[string]any {
+func translationRecordResponse(resource translatableResource, record translationRecord) map[string]any {
 	return map[string]any{
 		"status":              "ready",
 		"resource_type":       record.ResourceType,
 		"resource_id":         record.ResourceID,
+		"source_language":     resource.SourceLanguage,
 		"target_language":     record.TargetLanguage,
 		"source_hash":         record.SourceHash,
 		"translation_version": record.TranslationVersion,
@@ -544,8 +626,32 @@ func pendingTranslationResponse(resource translatableResource, targetLanguage st
 		"status":              "pending",
 		"resource_type":       resource.Type,
 		"resource_id":         resource.ID,
+		"source_language":     resource.SourceLanguage,
 		"target_language":     targetLanguage,
 		"source_hash":         resource.SourceHash,
 		"translation_version": translationVersion,
+	}
+}
+
+func originalTranslationResponse(resource translatableResource, targetLanguage string) map[string]any {
+	return map[string]any{
+		"status":              "ready",
+		"resource_type":       resource.Type,
+		"resource_id":         resource.ID,
+		"source_language":     resource.SourceLanguage,
+		"target_language":     targetLanguage,
+		"source_hash":         resource.SourceHash,
+		"translation_version": translationVersion,
+		"translation": map[string]any{
+			"title": resource.Title,
+			"body":  resource.Body,
+		},
+		"provider":      "",
+		"model":         "",
+		"input_tokens":  0,
+		"output_tokens": 0,
+		"cost_micros":   0,
+		"created_at":    "",
+		"updated_at":    "",
 	}
 }

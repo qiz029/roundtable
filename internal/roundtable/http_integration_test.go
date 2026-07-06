@@ -2729,11 +2729,11 @@ func TestTranslationCacheAPIAndWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process translations: %v", err)
 	}
-	if processed != 4 {
-		t.Fatalf("processed jobs = %d, want 4", processed)
+	if processed != 2 {
+		t.Fatalf("processed jobs = %d, want 2", processed)
 	}
-	if got := provider.CallCount(); got != 4 {
-		t.Fatalf("provider call count = %d, want 4", got)
+	if got := provider.CallCount(); got != 2 {
+		t.Fatalf("provider call count = %d, want 2", got)
 	}
 
 	ready := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/translations", "", map[string]any{
@@ -2743,6 +2743,12 @@ func TestTranslationCacheAPIAndWorker(t *testing.T) {
 	}, http.StatusOK)
 	if got := stringField(t, ready, "status"); got != "ready" {
 		t.Fatalf("ready status = %q", got)
+	}
+	if got := stringField(t, ready, "source_language"); got != "en" {
+		t.Fatalf("ready source_language = %q, want en", got)
+	}
+	if got := stringField(t, ready, "target_language"); got != "zh-CN" {
+		t.Fatalf("ready target_language = %q, want zh-CN", got)
 	}
 	translation := mapField(t, ready, "translation")
 	if got := stringField(t, translation, "title"); got != "[zh-CN] How should translation caching work?" {
@@ -2764,7 +2770,10 @@ func TestTranslationCacheAPIAndWorker(t *testing.T) {
 	if got := stringFieldAllowEmpty(t, answerTranslation, "title"); got != "" {
 		t.Fatalf("answer translated title = %q, want empty", got)
 	}
-	if got := stringField(t, answerTranslation, "body"); got != "[en] Translate this public answer too." {
+	if got := stringField(t, answerReady, "source_language"); got != "en" {
+		t.Fatalf("answer source_language = %q, want en", got)
+	}
+	if got := stringField(t, answerTranslation, "body"); got != "Translate this public answer too." {
 		t.Fatalf("answer translated body = %q", got)
 	}
 
@@ -2775,8 +2784,29 @@ func TestTranslationCacheAPIAndWorker(t *testing.T) {
 	if processedAgain != 0 {
 		t.Fatalf("processed duplicate jobs = %d, want 0", processedAgain)
 	}
-	if got := provider.CallCount(); got != 4 {
-		t.Fatalf("provider call count after cache hit = %d, want 4", got)
+	if got := provider.CallCount(); got != 2 {
+		t.Fatalf("provider call count after cache hit = %d, want 2", got)
+	}
+
+	chineseQuestion := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "如何缓存翻译？",
+		"body":  "中文内容请求中文翻译时应该直接返回原文。",
+	}, http.StatusCreated)
+	chineseQuestionID := stringField(t, chineseQuestion, "id")
+	original := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/translations", "", map[string]any{
+		"resource_type":   "question",
+		"resource_id":     chineseQuestionID,
+		"target_language": "zh-CN",
+	}, http.StatusOK)
+	if got := stringField(t, original, "source_language"); got != "zh-CN" {
+		t.Fatalf("original source_language = %q, want zh-CN", got)
+	}
+	originalTranslation := mapField(t, original, "translation")
+	if got := stringField(t, originalTranslation, "title"); got != "如何缓存翻译？" {
+		t.Fatalf("original title = %q", got)
+	}
+	if got := provider.CallCount(); got != 2 {
+		t.Fatalf("provider call count after original response = %d, want 2", got)
 	}
 }
 
@@ -2813,8 +2843,8 @@ func TestTranslationWorkerFailureAndBudgetDoNotBreakReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process failing translations: %v", err)
 	}
-	if processed != 2 {
-		t.Fatalf("processed failing jobs = %d, want 2", processed)
+	if processed != 1 {
+		t.Fatalf("processed failing jobs = %d, want 1", processed)
 	}
 	getJSON(t, newHTTPClient(t), server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK)
 	postJSON(t, newHTTPClient(t), server.URL+"/api/v1/translations", "", map[string]any{
@@ -2853,8 +2883,8 @@ func TestTranslationWorkerFailureAndBudgetDoNotBreakReads(t *testing.T) {
 	if err != nil {
 		t.Fatalf("process budget translations: %v", err)
 	}
-	if budgetProcessed != 2 {
-		t.Fatalf("budget processed jobs = %d, want 2 deferred jobs", budgetProcessed)
+	if budgetProcessed != 1 {
+		t.Fatalf("budget processed jobs = %d, want 1 deferred job", budgetProcessed)
 	}
 	if got := budgetProvider.CallCount(); got != 0 {
 		t.Fatalf("budget provider call count = %d, want 0", got)
@@ -3969,6 +3999,12 @@ func (p *fakeTranslationProvider) Translate(_ context.Context, req roundtable.Tr
 	p.mu.Lock()
 	p.calls++
 	p.mu.Unlock()
+	if req.SourceLanguage == "" {
+		return roundtable.TranslationProviderResult{}, errors.New("missing source language")
+	}
+	if req.SourceLanguage == req.TargetLanguage {
+		return roundtable.TranslationProviderResult{}, errors.New("same-language translation reached provider")
+	}
 	if p.err != nil {
 		return roundtable.TranslationProviderResult{}, p.err
 	}

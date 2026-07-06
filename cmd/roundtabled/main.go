@@ -7,7 +7,9 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/qiz029/roundtable/internal/roundtable"
 )
@@ -28,6 +30,14 @@ func main() {
 	if err != nil {
 		fatal(logger, "configure_mailer_failed", err)
 	}
+	translationProvider, err := newTranslationProviderFromEnv(os.Getenv)
+	if err != nil {
+		fatal(logger, "configure_translation_provider_failed", err)
+	}
+	translationWorker, err := newTranslationWorkerConfigFromEnv(os.Getenv)
+	if err != nil {
+		fatal(logger, "configure_translation_worker_failed", err)
+	}
 	app, err := roundtable.NewApp(roundtable.Options{
 		DatabaseURL:         *databaseURL,
 		Mailer:              mailer,
@@ -35,6 +45,8 @@ func main() {
 		AvatarStore:         avatarStore,
 		AvatarPublicBaseURL: avatarPublicBaseURL,
 		AvatarMediaBaseURL:  avatarMediaBaseURL,
+		TranslationProvider: translationProvider,
+		TranslationWorker:   translationWorker,
 		Logger:              logger,
 	})
 	if err != nil {
@@ -50,6 +62,46 @@ func main() {
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		fatal(logger, "http_server_failed", err)
 	}
+}
+
+func newTranslationProviderFromEnv(getenv func(string) string) (roundtable.TranslationProvider, error) {
+	apiKey := strings.TrimSpace(getenv("DEEPSEEK_API_KEY"))
+	if apiKey == "" {
+		return nil, nil
+	}
+	return roundtable.NewDeepSeekTranslationProvider(roundtable.DeepSeekTranslationProviderOptions{
+		APIKey:     apiKey,
+		APIBaseURL: getenv("DEEPSEEK_API_BASE_URL"),
+		Model:      getenv("TRANSLATION_MODEL"),
+	})
+}
+
+func newTranslationWorkerConfigFromEnv(getenv func(string) string) (roundtable.TranslationWorkerConfig, error) {
+	config := roundtable.TranslationWorkerConfig{
+		Enabled: envBoolValue(getenv("TRANSLATION_WORKER_ENABLED")),
+	}
+	if err := setDurationEnv(getenv, "TRANSLATION_WORKER_POLL_INTERVAL", &config.PollInterval); err != nil {
+		return roundtable.TranslationWorkerConfig{}, err
+	}
+	if err := setIntEnv(getenv, "TRANSLATION_WORKER_BATCH_SIZE", &config.BatchSize); err != nil {
+		return roundtable.TranslationWorkerConfig{}, err
+	}
+	if err := setIntEnv(getenv, "TRANSLATION_WORKER_MAX_CONCURRENCY", &config.MaxConcurrency); err != nil {
+		return roundtable.TranslationWorkerConfig{}, err
+	}
+	if err := setIntEnv(getenv, "TRANSLATION_WORKER_MAX_ATTEMPTS", &config.MaxAttempts); err != nil {
+		return roundtable.TranslationWorkerConfig{}, err
+	}
+	if err := setDurationEnv(getenv, "TRANSLATION_WORKER_RETRY_BASE_DELAY", &config.RetryBaseDelay); err != nil {
+		return roundtable.TranslationWorkerConfig{}, err
+	}
+	if err := setIntEnv(getenv, "TRANSLATION_DAILY_BUDGET_MICROS", &config.DailyBudgetMicros); err != nil {
+		return roundtable.TranslationWorkerConfig{}, err
+	}
+	if err := setIntEnv(getenv, "TRANSLATION_ESTIMATED_COST_MICROS", &config.EstimatedCostMicros); err != nil {
+		return roundtable.TranslationWorkerConfig{}, err
+	}
+	return config, nil
 }
 
 func fatal(logger *slog.Logger, message string, err error) {
@@ -167,4 +219,36 @@ func envBoolValue(value string) bool {
 	default:
 		return false
 	}
+}
+
+func setIntEnv(getenv func(string) string, name string, target *int) error {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fmt.Errorf("%s must be an integer", name)
+	}
+	if value < 0 {
+		return fmt.Errorf("%s must be non-negative", name)
+	}
+	*target = value
+	return nil
+}
+
+func setDurationEnv(getenv func(string) string, name string, target *time.Duration) error {
+	raw := strings.TrimSpace(getenv(name))
+	if raw == "" {
+		return nil
+	}
+	value, err := time.ParseDuration(raw)
+	if err != nil {
+		return fmt.Errorf("%s must be a Go duration such as 30s or 1m", name)
+	}
+	if value < 0 {
+		return fmt.Errorf("%s must be non-negative", name)
+	}
+	*target = value
+	return nil
 }

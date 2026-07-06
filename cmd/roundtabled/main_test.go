@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"testing"
+	"time"
 
 	"github.com/qiz029/roundtable/internal/roundtable"
 )
@@ -119,6 +120,83 @@ func TestNewAvatarStoreFromEnvRequiresExplicitDirectPublicURLs(t *testing.T) {
 	}
 	if publicBaseURL != "https://cdn.example.com/avatars" {
 		t.Fatalf("public base URL = %q, want trimmed configured URL", publicBaseURL)
+	}
+}
+
+func TestNewTranslationProviderFromEnvDefaultsDisabledWithoutKey(t *testing.T) {
+	provider, err := newTranslationProviderFromEnv(mapLookup(map[string]string{}))
+	if err != nil {
+		t.Fatalf("new translation provider from env: %v", err)
+	}
+	if provider != nil {
+		t.Fatalf("provider = %T, want nil", provider)
+	}
+}
+
+func TestNewTranslationProviderFromEnvConfiguresDeepSeek(t *testing.T) {
+	provider, err := newTranslationProviderFromEnv(mapLookup(map[string]string{
+		"DEEPSEEK_API_KEY":      "test-deepseek-key",
+		"DEEPSEEK_API_BASE_URL": "https://deepseek.example.com/",
+		"TRANSLATION_MODEL":     "deepseek-v4-flash",
+	}))
+	if err != nil {
+		t.Fatalf("new translation provider from env: %v", err)
+	}
+	if _, ok := provider.(*roundtable.DeepSeekTranslationProvider); !ok {
+		t.Fatalf("provider = %T, want *roundtable.DeepSeekTranslationProvider", provider)
+	}
+}
+
+func TestNewTranslationWorkerConfigFromEnv(t *testing.T) {
+	config, err := newTranslationWorkerConfigFromEnv(mapLookup(map[string]string{
+		"TRANSLATION_WORKER_ENABLED":          "true",
+		"TRANSLATION_WORKER_POLL_INTERVAL":    "15s",
+		"TRANSLATION_WORKER_BATCH_SIZE":       "25",
+		"TRANSLATION_WORKER_MAX_CONCURRENCY":  "3",
+		"TRANSLATION_WORKER_MAX_ATTEMPTS":     "4",
+		"TRANSLATION_WORKER_RETRY_BASE_DELAY": "45s",
+		"TRANSLATION_DAILY_BUDGET_MICROS":     "100000",
+		"TRANSLATION_ESTIMATED_COST_MICROS":   "100",
+	}))
+	if err != nil {
+		t.Fatalf("new translation worker config: %v", err)
+	}
+	if !config.Enabled {
+		t.Fatal("worker enabled = false, want true")
+	}
+	if config.PollInterval != 15*time.Second {
+		t.Fatalf("poll interval = %s", config.PollInterval)
+	}
+	if config.BatchSize != 25 {
+		t.Fatalf("batch size = %d", config.BatchSize)
+	}
+	if config.MaxConcurrency != 3 {
+		t.Fatalf("max concurrency = %d", config.MaxConcurrency)
+	}
+	if config.MaxAttempts != 4 {
+		t.Fatalf("max attempts = %d", config.MaxAttempts)
+	}
+	if config.RetryBaseDelay != 45*time.Second {
+		t.Fatalf("retry base delay = %s", config.RetryBaseDelay)
+	}
+	if config.DailyBudgetMicros != 100000 {
+		t.Fatalf("daily budget = %d", config.DailyBudgetMicros)
+	}
+	if config.EstimatedCostMicros != 100 {
+		t.Fatalf("estimated cost = %d", config.EstimatedCostMicros)
+	}
+}
+
+func TestNewTranslationWorkerConfigFromEnvRejectsBadValues(t *testing.T) {
+	if _, err := newTranslationWorkerConfigFromEnv(mapLookup(map[string]string{
+		"TRANSLATION_WORKER_BATCH_SIZE": "nope",
+	})); err == nil {
+		t.Fatal("expected bad batch size error")
+	}
+	if _, err := newTranslationWorkerConfigFromEnv(mapLookup(map[string]string{
+		"TRANSLATION_WORKER_POLL_INTERVAL": "soon",
+	})); err == nil {
+		t.Fatal("expected bad poll interval error")
 	}
 }
 
