@@ -30,6 +30,7 @@ type userProfile struct {
 	WebsiteURL        string
 	SocialLinksRaw    string
 	IsSeedUser        bool
+	PreferredLanguage string
 	EmailVerified     bool
 	FollowerCount     int
 	FollowingCount    int
@@ -135,6 +136,7 @@ func (a *App) updateMyProfile(w http.ResponseWriter, r *http.Request, user curre
 		AvatarURL   json.RawMessage `json:"avatar_url"`
 		WebsiteURL  *string         `json:"website_url"`
 		SocialLinks []socialLink    `json:"social_links"`
+		Language    *string         `json:"preferred_language"`
 	}
 	if err := decodeJSON(r, &req); err != nil {
 		writeError(w, err)
@@ -173,6 +175,14 @@ func (a *App) updateMyProfile(w http.ResponseWriter, r *http.Request, user curre
 		}
 		profile.SocialLinksRaw = linksRaw
 	}
+	if req.Language != nil {
+		language := strings.TrimSpace(*req.Language)
+		if !validLanguage(language) {
+			writeError(w, errInvalidInput("preferred_language must be en or zh-CN"))
+			return
+		}
+		profile.PreferredLanguage = language
+	}
 
 	if _, err := a.db.ExecContext(r.Context(), `
 		UPDATE users
@@ -182,10 +192,11 @@ func (a *App) updateMyProfile(w http.ResponseWriter, r *http.Request, user curre
 			background = $4,
 			avatar_url = '',
 			website_url = $5,
-			social_links_json = $6
-		WHERE id = $7
+			social_links_json = $6,
+			preferred_language = $7
+		WHERE id = $8
 	`, profile.DisplayName, profile.FullName, profile.Bio, profile.Background,
-		profile.WebsiteURL, profile.SocialLinksRaw, profile.ID); err != nil {
+		profile.WebsiteURL, profile.SocialLinksRaw, profile.PreferredLanguage, profile.ID); err != nil {
 		writeError(w, err)
 		return
 	}
@@ -245,7 +256,7 @@ func (a *App) listUserFollowers(w http.ResponseWriter, r *http.Request, userID s
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
 			u.avatar_url, u.avatar_object_key, u.avatar_content_type, u.avatar_updated_at,
-			u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
+			u.website_url, u.social_links_json, u.is_seed_user, u.preferred_language, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM user_follows f
@@ -285,7 +296,7 @@ func (a *App) listUserFollowing(w http.ResponseWriter, r *http.Request, userID s
 	rows, err := a.db.QueryContext(r.Context(), `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
 			u.avatar_url, u.avatar_object_key, u.avatar_content_type, u.avatar_updated_at,
-			u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
+			u.website_url, u.social_links_json, u.is_seed_user, u.preferred_language, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM user_follows f
@@ -316,7 +327,7 @@ func (a *App) userProfileByID(ctx context.Context, userID string) (userProfile, 
 	row := a.db.QueryRowContext(ctx, `
 		SELECT u.id, u.email, u.display_name, u.full_name, u.bio, u.background,
 			u.avatar_url, u.avatar_object_key, u.avatar_content_type, u.avatar_updated_at,
-			u.website_url, u.social_links_json, u.is_seed_user, u.email_verified_at,
+			u.website_url, u.social_links_json, u.is_seed_user, u.preferred_language, u.email_verified_at,
 			(SELECT COUNT(*) FROM user_follows WHERE followee_user_id = u.id) AS follower_count,
 			(SELECT COUNT(*) FROM user_follows WHERE follower_user_id = u.id) AS following_count
 		FROM users u
@@ -343,7 +354,8 @@ func scanUserProfile(scanner userProfileScanner) (userProfile, error) {
 	err := scanner.Scan(&profile.ID, &profile.Email, &profile.DisplayName, &profile.FullName,
 		&profile.Bio, &profile.Background, &profile.AvatarURL, &profile.AvatarObjectKey,
 		&profile.AvatarContentType, &profile.AvatarUpdatedAt, &profile.WebsiteURL,
-		&profile.SocialLinksRaw, &profile.IsSeedUser, &emailVerifiedAt, &profile.FollowerCount, &profile.FollowingCount)
+		&profile.SocialLinksRaw, &profile.IsSeedUser, &profile.PreferredLanguage, &emailVerifiedAt,
+		&profile.FollowerCount, &profile.FollowingCount)
 	profile.EmailVerified = emailVerifiedAt.Valid
 	return profile, err
 }
@@ -352,6 +364,7 @@ func (a *App) privateUserProfileResponse(profile userProfile) map[string]any {
 	resp := a.publicUserProfileResponse(profile)
 	resp["email"] = profile.Email
 	resp["email_verified"] = profile.EmailVerified
+	resp["preferred_language"] = profile.PreferredLanguage
 	return resp
 }
 

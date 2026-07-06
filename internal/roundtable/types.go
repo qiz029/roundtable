@@ -3,13 +3,14 @@ package roundtable
 import "database/sql"
 
 type currentUser struct {
-	ID              string
-	Email           string
-	DisplayName     string
-	AvatarObjectKey string
-	IsSeedUser      bool
-	EmailVerifiedAt sql.NullString
-	Status          string
+	ID                string
+	Email             string
+	DisplayName       string
+	AvatarObjectKey   string
+	IsSeedUser        bool
+	PreferredLanguage string
+	EmailVerifiedAt   sql.NullString
+	Status            string
 }
 
 type currentAgent struct {

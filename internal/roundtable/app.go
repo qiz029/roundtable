@@ -25,6 +25,8 @@ type Options struct {
 	AvatarStore         AvatarStore
 	AvatarPublicBaseURL string
 	AvatarMediaBaseURL  string
+	TranslationProvider TranslationProvider
+	TranslationWorker   TranslationWorkerConfig
 	Logger              *slog.Logger
 }
 
@@ -37,6 +39,10 @@ type App struct {
 	avatarStore         AvatarStore
 	avatarPublicBaseURL string
 	avatarMediaBaseURL  string
+	translationProvider TranslationProvider
+	translationWorker   TranslationWorkerConfig
+	translationCancel   context.CancelFunc
+	translationDone     chan struct{}
 	logger              *slog.Logger
 }
 
@@ -68,16 +74,25 @@ func NewApp(opts Options) (*App, error) {
 		avatarStore:         opts.AvatarStore,
 		avatarPublicBaseURL: strings.TrimRight(strings.TrimSpace(opts.AvatarPublicBaseURL), "/"),
 		avatarMediaBaseURL:  strings.TrimRight(strings.TrimSpace(opts.AvatarMediaBaseURL), "/"),
+		translationProvider: opts.TranslationProvider,
+		translationWorker:   normalizeTranslationWorkerConfig(opts.TranslationWorker),
 		logger:              opts.Logger,
 	}
 	if err := app.migrate(context.Background()); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
+	app.startTranslationWorker()
 	return app, nil
 }
 
 func (a *App) Close() error {
+	if a.translationCancel != nil {
+		a.translationCancel()
+		if a.translationDone != nil {
+			<-a.translationDone
+		}
+	}
 	return a.db.Close()
 }
 
@@ -102,6 +117,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/feed/answers", a.handleAnswerFeed)
 	mux.HandleFunc("/api/v1/feed/events", a.handleFeedEvents)
 	mux.HandleFunc("/api/v1/feed", a.handleFeed)
+	mux.HandleFunc("/api/v1/translations", a.handleTranslations)
 	mux.HandleFunc("/api/v1/questions", a.handleQuestions)
 	mux.HandleFunc("/api/v1/questions/", a.handleQuestion)
 	mux.HandleFunc("/api/v1/answers/", a.handleUserAnswerAction)
@@ -127,6 +143,9 @@ func (a *App) migrate(ctx context.Context) error {
 	}
 	if err := a.rebuildQuestionSearchIndex(ctx); err != nil {
 		return fmt.Errorf("rebuild question search index: %w", err)
+	}
+	if err := a.enqueueTranslationBackfill(ctx); err != nil {
+		return fmt.Errorf("enqueue translation backfill: %w", err)
 	}
 	return nil
 }
@@ -285,6 +304,7 @@ CREATE TABLE IF NOT EXISTS users (
 	status TEXT NOT NULL DEFAULT 'active',
 	agent_limit INTEGER NOT NULL DEFAULT 3,
 	is_seed_user BOOLEAN NOT NULL DEFAULT FALSE,
+	preferred_language TEXT NOT NULL DEFAULT 'en',
 	created_at TEXT NOT NULL
 );
 
@@ -384,6 +404,53 @@ CREATE TABLE IF NOT EXISTS answer_responses (
 	updated_at TEXT NOT NULL,
 	UNIQUE(answer_id, agent_id),
 	CHECK(stance IN ('clarify', 'extend', 'disagree', 'question'))
+);
+
+CREATE TABLE IF NOT EXISTS content_translations (
+	id TEXT PRIMARY KEY,
+	resource_type TEXT NOT NULL,
+	resource_id TEXT NOT NULL,
+	target_language TEXT NOT NULL,
+	source_hash TEXT NOT NULL,
+	translation_version INTEGER NOT NULL,
+	translated_title TEXT NOT NULL DEFAULT '',
+	translated_body TEXT NOT NULL DEFAULT '',
+	provider TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	input_tokens INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	cost_micros INTEGER NOT NULL DEFAULT 0,
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	UNIQUE(resource_type, resource_id, target_language, source_hash, translation_version),
+	CHECK(resource_type IN ('question', 'answer')),
+	CHECK(target_language IN ('en', 'zh-CN'))
+);
+
+CREATE TABLE IF NOT EXISTS translation_jobs (
+	id TEXT PRIMARY KEY,
+	resource_type TEXT NOT NULL,
+	resource_id TEXT NOT NULL,
+	target_language TEXT NOT NULL,
+	source_hash TEXT NOT NULL,
+	translation_version INTEGER NOT NULL,
+	status TEXT NOT NULL DEFAULT 'pending',
+	attempts INTEGER NOT NULL DEFAULT 0,
+	max_attempts INTEGER NOT NULL DEFAULT 3,
+	next_attempt_at TEXT NOT NULL,
+	locked_at TEXT,
+	provider TEXT NOT NULL DEFAULT '',
+	model TEXT NOT NULL DEFAULT '',
+	input_tokens INTEGER NOT NULL DEFAULT 0,
+	output_tokens INTEGER NOT NULL DEFAULT 0,
+	cost_micros INTEGER NOT NULL DEFAULT 0,
+	last_error TEXT NOT NULL DEFAULT '',
+	created_at TEXT NOT NULL,
+	updated_at TEXT NOT NULL,
+	UNIQUE(resource_type, resource_id, target_language, source_hash, translation_version),
+	CHECK(resource_type IN ('question', 'answer')),
+	CHECK(target_language IN ('en', 'zh-CN')),
+	CHECK(status IN ('pending', 'running', 'succeeded', 'failed'))
 );
 
 CREATE TABLE IF NOT EXISTS feed_events (
@@ -504,6 +571,12 @@ CREATE INDEX IF NOT EXISTS answer_responses_answer_created
 CREATE INDEX IF NOT EXISTS answer_responses_agent_created
 	ON answer_responses(agent_id, created_at DESC);
 
+CREATE INDEX IF NOT EXISTS translation_jobs_pending
+	ON translation_jobs(status, next_attempt_at, created_at);
+
+CREATE INDEX IF NOT EXISTS content_translations_resource
+	ON content_translations(resource_type, resource_id, target_language);
+
 	ALTER TABLE feed_events ALTER COLUMN question_id DROP NOT NULL;
 	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS answer_id TEXT REFERENCES answers(id) ON DELETE CASCADE;
 	ALTER TABLE feed_events ADD COLUMN IF NOT EXISTS query TEXT NOT NULL DEFAULT '';
@@ -551,6 +624,7 @@ CREATE INDEX IF NOT EXISTS votes_answer_active
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS social_links_json TEXT NOT NULL DEFAULT '[]';
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS agent_limit INTEGER NOT NULL DEFAULT 3;
 	ALTER TABLE users ADD COLUMN IF NOT EXISTS is_seed_user BOOLEAN NOT NULL DEFAULT FALSE;
+	ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_language TEXT NOT NULL DEFAULT 'en';
 
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS instructions TEXT NOT NULL DEFAULT '';
 	ALTER TABLE agents ADD COLUMN IF NOT EXISTS homepage_url TEXT NOT NULL DEFAULT '';

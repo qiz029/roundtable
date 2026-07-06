@@ -678,6 +678,33 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+  /api/v1/translations:
+    post:
+      summary: Request or read a cached content translation
+      description: Returns ready cached translations for public questions and answers. If the detected source_language already equals target_language, the API returns the original title/body without provider work. Logged-in users may enqueue missing translations; anonymous callers only read ready cache entries.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TranslationRequest"
+      responses:
+        "200":
+          description: Ready cached translation or original content when source_language equals target_language
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranslationResponse"
+        "202":
+          description: Translation job queued or already pending
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TranslationResponse"
+        "400":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
   /api/v1/questions:
     get:
       summary: List public questions
@@ -1351,7 +1378,7 @@ components:
           type: string
     User:
       type: object
-      required: [id, email, display_name, avatar_url, is_seed_user, email_verified]
+      required: [id, email, display_name, avatar_url, is_seed_user, preferred_language, email_verified]
       properties:
         id:
           type: string
@@ -1364,6 +1391,9 @@ components:
           description: Backend-generated read URL for the normalized avatar, or an empty string when unset.
         is_seed_user:
           type: boolean
+        preferred_language:
+          type: string
+          enum: [en, zh-CN]
         email_verified:
           type: boolean
     AvatarUploadRequest:
@@ -1428,13 +1458,16 @@ components:
       allOf:
         - $ref: "#/components/schemas/PublicUserProfile"
         - type: object
-          required: [email, email_verified]
+          required: [email, email_verified, preferred_language]
           properties:
             email:
               type: string
               format: email
             email_verified:
               type: boolean
+            preferred_language:
+              type: string
+              enum: [en, zh-CN]
     UpdateUserProfileRequest:
       type: object
       properties:
@@ -1447,6 +1480,9 @@ components:
           type: string
         background:
           type: string
+        preferred_language:
+          type: string
+          enum: [en, zh-CN]
         website_url:
           type: string
         social_links:
@@ -1697,6 +1733,67 @@ components:
           description: Required for tag_filter events.
           items:
             type: string
+    TranslationRequest:
+      type: object
+      required: [resource_type, resource_id, target_language]
+      properties:
+        resource_type:
+          type: string
+          enum: [question, answer]
+        resource_id:
+          type: string
+        target_language:
+          type: string
+          enum: [en, zh-CN]
+    TranslationPayload:
+      type: object
+      required: [title, body]
+      properties:
+        title:
+          type: string
+          description: Empty for answer translations.
+        body:
+          type: string
+    TranslationResponse:
+      type: object
+      required: [status, resource_type, resource_id, source_language, target_language, source_hash, translation_version]
+      properties:
+        status:
+          type: string
+          enum: [ready, pending]
+        resource_type:
+          type: string
+          enum: [question, answer]
+        resource_id:
+          type: string
+        source_language:
+          type: string
+          enum: [en, zh-CN]
+          description: Detected source language for the current source hash.
+        target_language:
+          type: string
+          enum: [en, zh-CN]
+        source_hash:
+          type: string
+        translation_version:
+          type: integer
+        translation:
+          $ref: "#/components/schemas/TranslationPayload"
+        provider:
+          type: string
+        model:
+          type: string
+        input_tokens:
+          type: integer
+        output_tokens:
+          type: integer
+        cost_micros:
+          type: integer
+          description: Estimated provider cost in micros, computed from returned token usage and configured rates.
+        created_at:
+          type: string
+        updated_at:
+          type: string
     FeedEvent:
       type: object
       required: [id, question_id, event_type, source, created_at]
