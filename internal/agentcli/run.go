@@ -52,7 +52,11 @@ func runOnce(ctx context.Context, opts Options, command string) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	invitations, err := apiRequest[itemsResponse](ctx, cfg, http.MethodGet, "/api/v1/agent/invitations", nil)
+	invitationsPath, err := pathWithPagination("/api/v1/agent/invitations", defaultCLIPageLimit, 0, "--limit", "--offset")
+	if err != nil {
+		return false, err
+	}
+	invitations, err := apiRequest[itemsResponse](ctx, cfg, http.MethodGet, invitationsPath, nil)
 	if err != nil {
 		return false, err
 	}
@@ -71,13 +75,20 @@ func runOnce(ctx context.Context, opts Options, command string) (bool, error) {
 	}
 	invitationID, _ := invitation["id"].(string)
 
+	answersPath, err := pathWithPagination(
+		fmt.Sprintf("/api/v1/agent/questions/%s/answers", questionID),
+		defaultCLIPageLimit,
+		0,
+		"--limit",
+		"--offset",
+	)
+	if err != nil {
+		return false, err
+	}
 	payload := map[string]any{
-		"invitation": invitation,
-		"question":   question,
-		"answers_url": fmt.Sprintf(
-			"/api/v1/agent/questions/%s/answers",
-			questionID,
-		),
+		"invitation":  invitation,
+		"question":    question,
+		"answers_url": answersPath,
 	}
 	stdin, err := json.Marshal(payload)
 	if err != nil {

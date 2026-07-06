@@ -6,8 +6,12 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 )
+
+const defaultCLIPageLimit = 10
 
 func runAgentProfile(ctx context.Context, args []string, opts Options) error {
 	if len(args) == 1 && args[0] == "show" {
@@ -114,7 +118,49 @@ func runAvatarUpload(ctx context.Context, args []string, opts Options) error {
 }
 
 func runProxyList(ctx context.Context, args []string, opts Options, name string, path string) error {
-	if len(args) == 1 && args[0] == "list" {
+	if len(args) > 0 && args[0] == "list" {
+		fs := flag.NewFlagSet(name+" list", flag.ContinueOnError)
+		fs.SetOutput(opts.Stderr)
+		limit, offset := addPaginationFlags(fs)
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return fmt.Errorf("usage: %s list [--limit N] [--offset N]", name)
+		}
+		paginatedPath, err := pathWithPagination(path, *limit, *offset, "--limit", "--offset")
+		if err != nil {
+			return err
+		}
+		cfg, err := loadConfig(opts.HomeDir)
+		if err != nil {
+			return err
+		}
+		resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodGet, paginatedPath, nil)
+		if err != nil {
+			return err
+		}
+		return writePrettyJSON(opts.Stdout, resp)
+	}
+	if name == "questions" && len(args) > 0 && args[0] == "show" {
+		fs := flag.NewFlagSet("questions show", flag.ContinueOnError)
+		fs.SetOutput(opts.Stderr)
+		answersLimit := fs.Int("answers-limit", defaultCLIPageLimit, "Maximum answers to include")
+		answersOffset := fs.Int("answers-offset", 0, "Answer offset to include")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 1 {
+			return errors.New("usage: questions show [--answers-limit N] [--answers-offset N] QUESTION_ID")
+		}
+		questionID := strings.TrimSpace(fs.Arg(0))
+		if questionID == "" {
+			return errors.New("question id is required")
+		}
+		path, err := pathWithPagination("/api/v1/agent/questions/"+url.PathEscape(questionID), *answersLimit, *answersOffset, "--answers-limit", "--answers-offset")
+		if err != nil {
+			return err
+		}
 		cfg, err := loadConfig(opts.HomeDir)
 		if err != nil {
 			return err
@@ -125,18 +171,10 @@ func runProxyList(ctx context.Context, args []string, opts Options, name string,
 		}
 		return writePrettyJSON(opts.Stdout, resp)
 	}
-	if name == "questions" && len(args) == 2 && args[0] == "show" {
-		cfg, err := loadConfig(opts.HomeDir)
-		if err != nil {
-			return err
-		}
-		resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodGet, "/api/v1/agent/questions/"+args[1], nil)
-		if err != nil {
-			return err
-		}
-		return writePrettyJSON(opts.Stdout, resp)
+	if name == "questions" {
+		return errors.New("usage: questions list [--limit N] [--offset N] | questions show [--answers-limit N] [--answers-offset N] QUESTION_ID")
 	}
-	return fmt.Errorf("usage: %s list", name)
+	return fmt.Errorf("usage: %s list [--limit N] [--offset N]", name)
 }
 
 func runAnswers(ctx context.Context, args []string, opts Options) error {
@@ -161,17 +199,25 @@ func runAnswerList(ctx context.Context, args []string, opts Options) error {
 	fs := flag.NewFlagSet("answers list", flag.ContinueOnError)
 	fs.SetOutput(opts.Stderr)
 	questionID := fs.String("question", "", "Question ID")
+	limit, offset := addPaginationFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected answers list arguments")
+	}
 	if strings.TrimSpace(*questionID) == "" {
 		return errors.New("--question is required")
+	}
+	path, err := pathWithPagination("/api/v1/agent/questions/"+url.PathEscape(strings.TrimSpace(*questionID))+"/answers", *limit, *offset, "--limit", "--offset")
+	if err != nil {
+		return err
 	}
 	cfg, err := loadConfig(opts.HomeDir)
 	if err != nil {
 		return err
 	}
-	resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodGet, "/api/v1/agent/questions/"+strings.TrimSpace(*questionID)+"/answers", nil)
+	resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodGet, path, nil)
 	if err != nil {
 		return err
 	}
@@ -242,21 +288,52 @@ func runResponseList(ctx context.Context, args []string, opts Options) error {
 	fs := flag.NewFlagSet("responses list", flag.ContinueOnError)
 	fs.SetOutput(opts.Stderr)
 	answerID := fs.String("answer", "", "Answer ID")
+	limit, offset := addPaginationFlags(fs)
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 {
+		return errors.New("unexpected responses list arguments")
+	}
 	if strings.TrimSpace(*answerID) == "" {
 		return errors.New("--answer is required")
+	}
+	path, err := pathWithPagination("/api/v1/answers/"+url.PathEscape(strings.TrimSpace(*answerID))+"/responses", *limit, *offset, "--limit", "--offset")
+	if err != nil {
+		return err
 	}
 	cfg, err := loadConfig(opts.HomeDir)
 	if err != nil {
 		return err
 	}
-	resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodGet, "/api/v1/answers/"+strings.TrimSpace(*answerID)+"/responses", nil)
+	resp, err := apiRequest[map[string]any](ctx, cfg, http.MethodGet, path, nil)
 	if err != nil {
 		return err
 	}
 	return writePrettyJSON(opts.Stdout, resp)
+}
+
+func addPaginationFlags(fs *flag.FlagSet) (*int, *int) {
+	limit := fs.Int("limit", defaultCLIPageLimit, "Maximum items to return")
+	offset := fs.Int("offset", 0, "Zero-based item offset")
+	return limit, offset
+}
+
+func pathWithPagination(path string, limit int, offset int, limitFlag string, offsetFlag string) (string, error) {
+	if limit < 1 || limit > 100 {
+		return "", fmt.Errorf("%s must be an integer between 1 and 100", limitFlag)
+	}
+	if offset < 0 {
+		return "", fmt.Errorf("%s must be a non-negative integer", offsetFlag)
+	}
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(limit))
+	query.Set("offset", strconv.Itoa(offset))
+	separator := "?"
+	if strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + query.Encode(), nil
 }
 
 func runResponseSubmit(ctx context.Context, args []string, opts Options) error {

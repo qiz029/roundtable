@@ -342,6 +342,13 @@ func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 	if got := stringField(t, shownQuestion, "id"); got != questionID {
 		t.Fatalf("shown question id = %q, want %q", got, questionID)
 	}
+	shownQuestionAnswersPagination := mapField(t, shownQuestion, "answers_pagination")
+	if got := intField(t, shownQuestionAnswersPagination, "limit"); got != 10 {
+		t.Fatalf("shown question answers pagination limit = %d, want 10", got)
+	}
+	if got := intField(t, shownQuestionAnswersPagination, "offset"); got != 0 {
+		t.Fatalf("shown question answers pagination offset = %d, want 0", got)
+	}
 
 	stdout.Reset()
 	if err := agentcli.Run(context.Background(), []string{
@@ -355,6 +362,9 @@ func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 	question := mapField(t, commandPayload, "question")
 	if got := stringField(t, question, "id"); got != questionID {
 		t.Fatalf("command question id = %q, want %q", got, questionID)
+	}
+	if got := stringField(t, commandPayload, "answers_url"); got != "/api/v1/agent/questions/"+questionID+"/answers?limit=10&offset=0" {
+		t.Fatalf("command answers_url = %q", got)
 	}
 	detail := getJSON(t, userClient, server.URL+"/api/v1/questions/"+questionID, "", http.StatusOK)
 	answers := listField(t, detail, "answers")
@@ -371,6 +381,7 @@ func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 		"answers",
 		"list",
 		"--question", questionID,
+		"--limit", "1",
 	}, opts); err != nil {
 		t.Fatalf("answers list: %v", err)
 	}
@@ -380,6 +391,10 @@ func TestRunConsumesInvitationAndSubmitsAnswer(t *testing.T) {
 	}
 	if got := len(listField(t, answerList, "items")); got != 1 {
 		t.Fatalf("cli answer count = %d, want 1", got)
+	}
+	answerListPagination := mapField(t, answerList, "pagination")
+	if got := intField(t, answerListPagination, "limit"); got != 1 {
+		t.Fatalf("answer list pagination limit = %d, want 1", got)
 	}
 }
 
@@ -443,11 +458,41 @@ func TestFeedListUsesAgentFeed(t *testing.T) {
 	if len(items) != 2 {
 		t.Fatalf("feed item count = %d, want 2", len(items))
 	}
+	feedPagination := mapField(t, feed, "pagination")
+	if got := intField(t, feedPagination, "limit"); got != 10 {
+		t.Fatalf("feed pagination limit = %d, want 10", got)
+	}
+	if got := intField(t, feedPagination, "offset"); got != 0 {
+		t.Fatalf("feed pagination offset = %d, want 0", got)
+	}
 	if got := stringField(t, items[0].(map[string]any), "id"); got != matchedQuestionID {
 		t.Fatalf("feed first id = %q, want tag-matched question", got)
 	}
 	if got := stringField(t, items[1].(map[string]any), "id"); got != recentQuestionID {
 		t.Fatalf("feed second id = %q, want recent unrelated question", got)
+	}
+
+	stdout.Reset()
+	if err := agentcli.Run(context.Background(), []string{"feed", "list", "--limit", "1", "--offset", "1"}, opts); err != nil {
+		t.Fatalf("feed list with pagination: %v", err)
+	}
+	var secondPage map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &secondPage); err != nil {
+		t.Fatalf("decode feed second page: %v", err)
+	}
+	secondPageItems := listField(t, secondPage, "items")
+	if len(secondPageItems) != 1 {
+		t.Fatalf("feed second page item count = %d, want 1", len(secondPageItems))
+	}
+	if got := stringField(t, secondPageItems[0].(map[string]any), "id"); got != recentQuestionID {
+		t.Fatalf("feed second page id = %q, want recent unrelated question", got)
+	}
+	secondPagePagination := mapField(t, secondPage, "pagination")
+	if got := intField(t, secondPagePagination, "limit"); got != 1 {
+		t.Fatalf("feed second page pagination limit = %d, want 1", got)
+	}
+	if got := intField(t, secondPagePagination, "offset"); got != 1 {
+		t.Fatalf("feed second page pagination offset = %d, want 1", got)
 	}
 }
 
@@ -763,6 +808,16 @@ func listField(t *testing.T, values map[string]any, name string) []any {
 		t.Fatalf("field %q = %#v, want list", name, values[name])
 	}
 	return value
+}
+
+func intField(t *testing.T, values map[string]any, name string) int {
+	t.Helper()
+
+	value, ok := values[name].(float64)
+	if !ok || value != float64(int(value)) {
+		t.Fatalf("field %q = %#v, want integer", name, values[name])
+	}
+	return int(value)
 }
 
 func mapField(t *testing.T, values map[string]any, name string) map[string]any {
