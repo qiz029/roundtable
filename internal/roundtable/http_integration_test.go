@@ -603,6 +603,41 @@ func TestUserAvatarUploadDeleteAndProfileSurfaces(t *testing.T) {
 	}
 }
 
+func TestAvatarMediaBaseURLReturnsAbsoluteBackendMediaRoute(t *testing.T) {
+	t.Parallel()
+
+	store, err := roundtable.NewLocalAvatarStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new avatar store: %v", err)
+	}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:             mailer,
+		AvatarStore:        store,
+		AvatarMediaBaseURL: "https://roundtable.example.com/",
+		Now: func() time.Time {
+			return time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	ownerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, ownerClient, server.URL, mailer, "avatar-media-base@example.com", "Avatar Media Base")
+	uploaded := postAvatar(t, ownerClient, server.URL+"/api/v1/me/avatar", "", testPNG(t, 16, 12), "avatar.png", http.StatusOK)
+	avatarURL := stringField(t, uploaded, "avatar_url")
+	const prefix = "https://roundtable.example.com/api/v1/media/avatars/"
+	if !strings.HasPrefix(avatarURL, prefix) {
+		t.Fatalf("avatar_url = %q, want absolute backend media route prefix %q", avatarURL, prefix)
+	}
+	mediaPath := strings.TrimPrefix(avatarURL, "https://roundtable.example.com")
+	assertAvatarMedia(t, newHTTPClient(t), server.URL+mediaPath)
+}
+
 func TestUserFollowFlow(t *testing.T) {
 	t.Parallel()
 

@@ -28,9 +28,15 @@ services:
         condition: service_healthy
     ports:
       - "${ROUNDTABLE_HOST_PORT:-8080}:8080"
+    volumes:
+      - roundtable-avatar-data:/app/data/avatars
     environment:
       ROUNDTABLE_ADDR: ":8080"
       ROUNDTABLE_DATABASE_URL: "${ROUNDTABLE_DATABASE_URL:-postgres://${ROUNDTABLE_POSTGRES_USER:-roundtable}:${ROUNDTABLE_POSTGRES_PASSWORD:-roundtable}@postgres:5432/${ROUNDTABLE_POSTGRES_DB:-roundtable}?sslmode=disable}"
+      ROUNDTABLE_AVATAR_STORE: "${ROUNDTABLE_AVATAR_STORE:-local}"
+      ROUNDTABLE_AVATAR_LOCAL_DIR: "${ROUNDTABLE_AVATAR_LOCAL_DIR:-/app/data/avatars}"
+      ROUNDTABLE_AVATAR_MEDIA_BASE_URL: "${ROUNDTABLE_AVATAR_MEDIA_BASE_URL:-}"
+      ROUNDTABLE_AVATAR_PUBLIC_BASE_URL: "${ROUNDTABLE_AVATAR_PUBLIC_BASE_URL:-}"
       ROUNDTABLE_MAILER: "${ROUNDTABLE_MAILER:-}"
       ROUNDTABLE_MAILGUN_API_BASE: "${ROUNDTABLE_MAILGUN_API_BASE:-}"
       ROUNDTABLE_MAILGUN_DOMAIN: "${ROUNDTABLE_MAILGUN_DOMAIN:-}"
@@ -57,3 +63,4 @@ services:
 
 volumes:
   roundtable-postgres-data:
+  roundtable-avatar-data:

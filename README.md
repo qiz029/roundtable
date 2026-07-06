@@ -35,7 +35,7 @@ Run with Docker Compose:
 docker compose up --build roundtabled
 ```
 
-Docker Compose builds the service image from `Dockerfile`, builds the Postgres image from `Dockerfile.postgres`, starts Postgres first, and stores database files in the `roundtable-postgres-data` volume.
+Docker Compose builds the service image from `Dockerfile`, builds the Postgres image from `Dockerfile.postgres`, starts Postgres first, stores database files in the `roundtable-postgres-data` volume, and stores local avatar objects in the `roundtable-avatar-data` volume.
 
 By default the service listens on host port `8080` and Postgres listens on host port `15432`. Override them with:
 
@@ -74,6 +74,10 @@ The script builds the service and Postgres images, starts `postgres` and `roundt
 | `ROUNDTABLE_SMTP_USERNAME` | empty | Optional SMTP username. |
 | `ROUNDTABLE_SMTP_PASSWORD` | empty | Optional SMTP password. |
 | `ROUNDTABLE_PUBLIC_URL` | empty | Public base URL used in verification emails. |
+| `ROUNDTABLE_AVATAR_STORE` | `local` in Docker Compose, disabled otherwise | Avatar object store mode: `local`, `s3`, or `disabled`. |
+| `ROUNDTABLE_AVATAR_LOCAL_DIR` | `/app/data/avatars` in Docker Compose, `data/avatars` in local mode otherwise | Local filesystem avatar storage path. |
+| `ROUNDTABLE_AVATAR_MEDIA_BASE_URL` | empty | Optional public origin for backend-served media URLs, for example `https://roundtable.example.com`. |
+| `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL` | empty | Optional public object-store/CDN base URL for direct object reads. Prefer `ROUNDTABLE_AVATAR_MEDIA_BASE_URL` when serving through the backend route. |
 
 With `ROUNDTABLE_MAILER=auto`, `roundtabled` uses Mailgun when any Mailgun config is present, then SMTP when any SMTP config is present, and otherwise the log mailer. If a provider is selected explicitly, missing required provider config fails server startup.
 
@@ -195,7 +199,8 @@ Configure avatar storage with environment variables:
 
 - `ROUNDTABLE_AVATAR_STORE=local|s3|disabled`
 - `ROUNDTABLE_AVATAR_LOCAL_DIR`: local filesystem storage path for `local` mode. Defaults to `data/avatars`.
-- `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL`: optional public read base URL generated into `avatar_url`. If unset, `avatar_url` uses `/api/v1/media/avatars/{avatar_id}`.
+- `ROUNDTABLE_AVATAR_MEDIA_BASE_URL`: optional public origin for backend-served media URLs. If set to `https://roundtable.example.com`, `avatar_url` uses `https://roundtable.example.com/api/v1/media/avatars/{avatar_id}`.
+- `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL`: optional public object-store/CDN base URL generated into `avatar_url` for direct object reads. If unset, `avatar_url` uses the backend media route.
 - `ROUNDTABLE_AVATAR_S3_ENDPOINT`, `ROUNDTABLE_AVATAR_S3_REGION`, `ROUNDTABLE_AVATAR_S3_BUCKET`, `ROUNDTABLE_AVATAR_S3_ACCESS_KEY_ID`, `ROUNDTABLE_AVATAR_S3_SECRET_ACCESS_KEY`, `ROUNDTABLE_AVATAR_S3_FORCE_PATH_STYLE`: S3-compatible storage settings.
 
 For self-hosted deployments, keep object-store credentials server-side, restrict the access key to the avatar bucket or prefix, do not expose the object-store admin console publicly, and put upload routes behind the same HTTPS/auth/rate-limit controls as the rest of the API.

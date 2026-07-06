@@ -18,7 +18,7 @@ func main() {
 	secureCookie := flag.Bool("secure-cookie", envBool("ROUNDTABLE_SECURE_COOKIE"), "Set Secure on session cookies")
 	flag.Parse()
 
-	avatarStore, avatarPublicBaseURL, err := newAvatarStoreFromEnv(os.Getenv)
+	avatarStore, avatarPublicBaseURL, avatarMediaBaseURL, err := newAvatarStoreFromEnv(os.Getenv)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -28,6 +28,7 @@ func main() {
 		CookieSecure:        *secureCookie,
 		AvatarStore:         avatarStore,
 		AvatarPublicBaseURL: avatarPublicBaseURL,
+		AvatarMediaBaseURL:  avatarMediaBaseURL,
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -44,18 +45,19 @@ func main() {
 	}
 }
 
-func newAvatarStoreFromEnv(getenv func(string) string) (roundtable.AvatarStore, string, error) {
+func newAvatarStoreFromEnv(getenv func(string) string) (roundtable.AvatarStore, string, string, error) {
 	publicBaseURL := strings.TrimRight(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_PUBLIC_BASE_URL")), "/")
+	mediaBaseURL := strings.TrimRight(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_MEDIA_BASE_URL")), "/")
 	switch strings.ToLower(strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_STORE"))) {
 	case "", "disabled":
-		return nil, publicBaseURL, nil
+		return nil, publicBaseURL, mediaBaseURL, nil
 	case "local":
 		dir := strings.TrimSpace(getenv("ROUNDTABLE_AVATAR_LOCAL_DIR"))
 		if dir == "" {
 			dir = "data/avatars"
 		}
 		store, err := roundtable.NewLocalAvatarStore(dir)
-		return store, publicBaseURL, err
+		return store, publicBaseURL, mediaBaseURL, err
 	case "s3":
 		store, err := roundtable.NewS3AvatarStore(roundtable.S3AvatarStore{
 			Endpoint:        getenv("ROUNDTABLE_AVATAR_S3_ENDPOINT"),
@@ -65,9 +67,9 @@ func newAvatarStoreFromEnv(getenv func(string) string) (roundtable.AvatarStore, 
 			SecretAccessKey: getenv("ROUNDTABLE_AVATAR_S3_SECRET_ACCESS_KEY"),
 			ForcePathStyle:  envBoolValue(getenv("ROUNDTABLE_AVATAR_S3_FORCE_PATH_STYLE")),
 		})
-		return store, publicBaseURL, err
+		return store, publicBaseURL, mediaBaseURL, err
 	default:
-		return nil, publicBaseURL, fmt.Errorf("unsupported avatar store %q", getenv("ROUNDTABLE_AVATAR_STORE"))
+		return nil, publicBaseURL, mediaBaseURL, fmt.Errorf("unsupported avatar store %q", getenv("ROUNDTABLE_AVATAR_STORE"))
 	}
 }
 

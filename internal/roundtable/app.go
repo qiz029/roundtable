@@ -23,6 +23,7 @@ type Options struct {
 	RateLimit           RateLimitConfig
 	AvatarStore         AvatarStore
 	AvatarPublicBaseURL string
+	AvatarMediaBaseURL  string
 }
 
 type App struct {
@@ -33,6 +34,7 @@ type App struct {
 	limiter             *rateLimiter
 	avatarStore         AvatarStore
 	avatarPublicBaseURL string
+	avatarMediaBaseURL  string
 }
 
 func NewApp(opts Options) (*App, error) {
@@ -62,6 +64,7 @@ func NewApp(opts Options) (*App, error) {
 		limiter:             newRateLimiter(opts.RateLimit),
 		avatarStore:         opts.AvatarStore,
 		avatarPublicBaseURL: strings.TrimRight(strings.TrimSpace(opts.AvatarPublicBaseURL), "/"),
+		avatarMediaBaseURL:  strings.TrimRight(strings.TrimSpace(opts.AvatarMediaBaseURL), "/"),
 	}
 	if err := app.migrate(context.Background()); err != nil {
 		_ = db.Close()

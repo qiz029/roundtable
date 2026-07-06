@@ -267,7 +267,11 @@ func (a *App) avatarURL(objectKey string) string {
 	if a.avatarPublicBaseURL != "" {
 		return a.avatarPublicBaseURL + "/" + objectKey
 	}
-	return "/api/v1/media/avatars/" + avatarOpaqueID(objectKey)
+	mediaPath := "/api/v1/media/avatars/" + avatarOpaqueID(objectKey)
+	if a.avatarMediaBaseURL != "" {
+		return a.avatarMediaBaseURL + mediaPath
+	}
+	return mediaPath
 }
 
 func (a *App) agentIdentityResponse(agentID string, agentName string, ownerName string, avatarObjectKey string) map[string]any {
