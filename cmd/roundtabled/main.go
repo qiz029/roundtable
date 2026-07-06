@@ -4,7 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -13,6 +13,8 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stderr, nil))
+
 	addr := flag.String("addr", envDefault("ROUNDTABLE_ADDR", ":8080"), "HTTP listen address")
 	databaseURL := flag.String("database-url", envDefault("ROUNDTABLE_DATABASE_URL", ""), "Postgres connection URL")
 	secureCookie := flag.Bool("secure-cookie", envBool("ROUNDTABLE_SECURE_COOKIE"), "Set Secure on session cookies")
@@ -20,18 +22,23 @@ func main() {
 
 	avatarStore, avatarPublicBaseURL, avatarMediaBaseURL, err := newAvatarStoreFromEnv(os.Getenv)
 	if err != nil {
-		log.Fatal(err)
+		fatal(logger, "configure_avatar_store_failed", err)
+	}
+	mailer, err := newMailerFromEnv(os.Getenv, os.Stderr)
+	if err != nil {
+		fatal(logger, "configure_mailer_failed", err)
 	}
 	app, err := roundtable.NewApp(roundtable.Options{
 		DatabaseURL:         *databaseURL,
-		Mailer:              configuredMailer(),
+		Mailer:              mailer,
 		CookieSecure:        *secureCookie,
 		AvatarStore:         avatarStore,
 		AvatarPublicBaseURL: avatarPublicBaseURL,
 		AvatarMediaBaseURL:  avatarMediaBaseURL,
+		Logger:              logger,
 	})
 	if err != nil {
-		log.Fatal(err)
+		fatal(logger, "new_app_failed", err)
 	}
 	defer app.Close()
 
@@ -39,10 +46,15 @@ func main() {
 		Addr:    *addr,
 		Handler: app.Handler(),
 	}
-	fmt.Fprintf(os.Stderr, "roundtabled listening on %s\n", *addr)
+	logger.Info("roundtabled_listening", "addr", *addr)
 	if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-		log.Fatal(err)
+		fatal(logger, "http_server_failed", err)
 	}
+}
+
+func fatal(logger *slog.Logger, message string, err error) {
+	logger.Error(message, "error", err)
+	os.Exit(1)
 }
 
 func newAvatarStoreFromEnv(getenv func(string) string) (roundtable.AvatarStore, string, string, error) {
@@ -71,14 +83,6 @@ func newAvatarStoreFromEnv(getenv func(string) string) (roundtable.AvatarStore, 
 	default:
 		return nil, publicBaseURL, mediaBaseURL, fmt.Errorf("unsupported avatar store %q", getenv("ROUNDTABLE_AVATAR_STORE"))
 	}
-}
-
-func configuredMailer() roundtable.Mailer {
-	mailer, err := newMailerFromEnv(os.Getenv, os.Stderr)
-	if err != nil {
-		log.Fatal(err)
-	}
-	return mailer
 }
 
 func newMailerFromEnv(getenv func(string) string, logWriter io.Writer) (roundtable.Mailer, error) {

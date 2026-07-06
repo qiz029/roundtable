@@ -462,5 +462,6 @@ func (a *App) requireAgent(ctx context.Context, r *http.Request) (currentAgent, 
 		}
 		return currentAgent{}, err
 	}
+	markRequestAgent(ctx, agent)
 	return agent, nil
 }

@@ -6,7 +6,7 @@ import (
 
 const (
 	corsAllowMethods = "GET, POST, PATCH, DELETE, OPTIONS"
-	corsAllowHeaders = "Authorization, Content-Type"
+	corsAllowHeaders = "Authorization, Content-Type, X-Request-Id"
 )
 
 func allowCORS(next http.Handler) http.Handler {
@@ -22,6 +22,7 @@ func allowCORS(next http.Handler) http.Handler {
 		header.Set("Access-Control-Allow-Credentials", "true")
 		header.Set("Access-Control-Allow-Methods", corsAllowMethods)
 		header.Set("Access-Control-Allow-Headers", requestedHeaders(r))
+		header.Set("Access-Control-Expose-Headers", requestIDHeader)
 		header.Add("Vary", "Origin")
 
 		if r.Method == http.MethodOptions {

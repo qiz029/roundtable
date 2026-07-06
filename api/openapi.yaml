@@ -1236,6 +1236,11 @@ components:
   responses:
     Error:
       description: Error response
+      headers:
+        X-Request-Id:
+          description: Correlation id for this request. Echoes a valid client-provided X-Request-Id or a server-generated id.
+          schema:
+            type: string
       content:
         application/json:
           schema:
@@ -1277,6 +1282,9 @@ components:
           type: string
         message:
           type: string
+        request_id:
+          type: string
+          description: Correlation id also returned in the X-Request-Id response header.
     Pagination:
       type: object
       required: [limit, offset, has_more, next_offset]

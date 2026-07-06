@@ -272,6 +272,7 @@ func (a *App) requireUserFor(ctx context.Context, r *http.Request, action string
 		}
 		return currentUser{}, err
 	}
+	markRequestUser(ctx, user.ID)
 	return user, nil
 }
 

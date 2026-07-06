@@ -10,6 +10,7 @@ import (
 	"image/color"
 	"image/jpeg"
 	"image/png"
+	"log/slog"
 	"mime/multipart"
 	"net/http"
 	"net/http/cookiejar"
@@ -600,6 +601,114 @@ func TestUserAvatarUploadDeleteAndProfileSurfaces(t *testing.T) {
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("deleted avatar media status = %d, want %d", resp.StatusCode, http.StatusNotFound)
+	}
+}
+
+func TestRequestIDHeaderAndErrorPayload(t *testing.T) {
+	t.Parallel()
+
+	app, err := newTestApp(t, roundtable.Options{})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	const requestID = "rt_req_frontend_123"
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/auth/me", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Request-Id", requestID)
+	resp, err := newHTTPClient(t).Do(req)
+	if err != nil {
+		t.Fatalf("get auth/me: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if got := resp.Header.Get("X-Request-Id"); got != requestID {
+		t.Fatalf("X-Request-Id = %q, want %q", got, requestID)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	var decoded map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&decoded); err != nil {
+		t.Fatalf("decode error response: %v", err)
+	}
+	if got := decoded["request_id"]; got != requestID {
+		t.Fatalf("request_id = %#v, want %q", got, requestID)
+	}
+}
+
+func TestStructuredAccessLogIncludesRequestContext(t *testing.T) {
+	t.Parallel()
+
+	var logs bytes.Buffer
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer: mailer,
+		Logger: slog.New(slog.NewJSONHandler(&logs, nil)),
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	client := newHTTPClient(t)
+	created := postJSON(t, client, server.URL+"/api/v1/auth/register", "", map[string]any{
+		"email":        "access-log@example.com",
+		"password":     testPassword,
+		"display_name": "Access Log",
+	}, http.StatusCreated)
+	userID := stringField(t, created, "id")
+	token, ok := mailer.VerificationToken("access-log@example.com")
+	if !ok {
+		t.Fatalf("verification token was not sent")
+	}
+	postJSON(t, client, server.URL+"/api/v1/auth/verify", "", map[string]any{"token": token}, http.StatusOK)
+	postJSON(t, client, server.URL+"/api/v1/auth/login", "", map[string]any{
+		"email":    "access-log@example.com",
+		"password": testPassword,
+	}, http.StatusOK)
+
+	const requestID = "rt_req_log_context"
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/api/v1/auth/me", nil)
+	if err != nil {
+		t.Fatalf("new request: %v", err)
+	}
+	req.Header.Set("X-Request-Id", requestID)
+	req.Header.Set("CF-Ray", "abc123-SJC")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("get auth/me: %v", err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+
+	entry := findLogEntry(t, logs.String(), requestID)
+	if got := entry["msg"]; got != "http_request" {
+		t.Fatalf("msg = %#v, want http_request", got)
+	}
+	if got := entry["method"]; got != http.MethodGet {
+		t.Fatalf("method = %#v, want GET", got)
+	}
+	if got := entry["path"]; got != "/api/v1/auth/me" {
+		t.Fatalf("path = %#v, want /api/v1/auth/me", got)
+	}
+	if got := entry["status"]; got != float64(http.StatusOK) {
+		t.Fatalf("status = %#v, want %d", got, http.StatusOK)
+	}
+	if got := entry["user_id"]; got != userID {
+		t.Fatalf("user_id = %#v, want %q", got, userID)
+	}
+	if got := entry["cf_ray"]; got != "abc123-SJC" {
+		t.Fatalf("cf_ray = %#v, want abc123-SJC", got)
 	}
 }
 
@@ -2834,6 +2943,7 @@ func TestCORSAllowsBrowserFrontend(t *testing.T) {
 	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Credentials", "true")
 	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Allow-Headers", "content-type, authorization")
+	assertCORSHeader(t, preflightResp.Header(), "Access-Control-Expose-Headers", "X-Request-Id")
 	assertCORSHeader(t, preflightResp.Header(), "Vary", "Origin")
 
 	health := httptest.NewRequest(http.MethodGet, "/api/v1/health", nil)
@@ -2846,6 +2956,7 @@ func TestCORSAllowsBrowserFrontend(t *testing.T) {
 	}
 	assertCORSHeader(t, healthResp.Header(), "Access-Control-Allow-Origin", "http://localhost:5173")
 	assertCORSHeader(t, healthResp.Header(), "Access-Control-Allow-Credentials", "true")
+	assertCORSHeader(t, healthResp.Header(), "Access-Control-Expose-Headers", "X-Request-Id")
 }
 
 func assertCORSHeader(t *testing.T, header http.Header, name string, want string) {
@@ -2947,6 +3058,25 @@ func assertOKHealth(t *testing.T, resp *httptest.ResponseRecorder) {
 	if got := body["ok"]; got != true {
 		t.Fatalf("health ok = %#v, want true", got)
 	}
+}
+
+func findLogEntry(t *testing.T, logLines string, requestID string) map[string]any {
+	t.Helper()
+
+	for _, line := range strings.Split(strings.TrimSpace(logLines), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		var entry map[string]any
+		if err := json.Unmarshal([]byte(line), &entry); err != nil {
+			t.Fatalf("decode log entry %q: %v", line, err)
+		}
+		if entry["request_id"] == requestID {
+			return entry
+		}
+	}
+	t.Fatalf("log entry with request_id %q not found in:\n%s", requestID, logLines)
+	return nil
 }
 
 func assertLoginRequired(t *testing.T, resp *http.Response, wantMessage string) {

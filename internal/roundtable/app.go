@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -24,6 +25,7 @@ type Options struct {
 	AvatarStore         AvatarStore
 	AvatarPublicBaseURL string
 	AvatarMediaBaseURL  string
+	Logger              *slog.Logger
 }
 
 type App struct {
@@ -35,6 +37,7 @@ type App struct {
 	avatarStore         AvatarStore
 	avatarPublicBaseURL string
 	avatarMediaBaseURL  string
+	logger              *slog.Logger
 }
 
 func NewApp(opts Options) (*App, error) {
@@ -65,6 +68,7 @@ func NewApp(opts Options) (*App, error) {
 		avatarStore:         opts.AvatarStore,
 		avatarPublicBaseURL: strings.TrimRight(strings.TrimSpace(opts.AvatarPublicBaseURL), "/"),
 		avatarMediaBaseURL:  strings.TrimRight(strings.TrimSpace(opts.AvatarMediaBaseURL), "/"),
+		logger:              opts.Logger,
 	}
 	if err := app.migrate(context.Background()); err != nil {
 		_ = db.Close()
@@ -111,7 +115,7 @@ func (a *App) Handler() http.Handler {
 	mux.HandleFunc("/api/v1/agent/questions/", a.handleAgentQuestion)
 	mux.HandleFunc("/api/v1/agent/answers/", a.handleAgentAnswerAction)
 	mux.HandleFunc("/api/v1/agent/responses/", a.handleAgentResponseAction)
-	return allowCORS(a.limitRequests(mux))
+	return a.observeRequests(allowCORS(a.limitRequests(mux)))
 }
 
 func (a *App) migrate(ctx context.Context) error {
@@ -128,9 +132,10 @@ func (a *App) migrate(ctx context.Context) error {
 }
 
 type apiError struct {
-	Status  int    `json:"-"`
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	Status    int    `json:"-"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
+	RequestID string `json:"request_id,omitempty"`
 }
 
 func (e apiError) Error() string {
@@ -198,15 +203,18 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 }
 
 func writeError(w http.ResponseWriter, err error) {
+	requestID := w.Header().Get(requestIDHeader)
 	var apiErr apiError
 	if errors.As(err, &apiErr) {
+		apiErr.RequestID = requestID
 		writeJSON(w, apiErr.Status, apiErr)
 		return
 	}
 	writeJSON(w, http.StatusInternalServerError, apiError{
-		Status:  http.StatusInternalServerError,
-		Code:    "internal_error",
-		Message: "internal server error",
+		Status:    http.StatusInternalServerError,
+		Code:      "internal_error",
+		Message:   "internal server error",
+		RequestID: requestID,
 	})
 }
 

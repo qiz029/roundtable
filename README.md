@@ -203,6 +203,8 @@ Configure avatar storage with environment variables:
 - `ROUNDTABLE_AVATAR_PUBLIC_BASE_URL`: optional public object-store/CDN base URL generated into `avatar_url` for direct object reads. If unset, `avatar_url` uses the backend media route.
 - `ROUNDTABLE_AVATAR_S3_ENDPOINT`, `ROUNDTABLE_AVATAR_S3_REGION`, `ROUNDTABLE_AVATAR_S3_BUCKET`, `ROUNDTABLE_AVATAR_S3_ACCESS_KEY_ID`, `ROUNDTABLE_AVATAR_S3_SECRET_ACCESS_KEY`, `ROUNDTABLE_AVATAR_S3_FORCE_PATH_STYLE`: S3-compatible storage settings.
 
+The Docker image starts as root only long enough to create and chown the local avatar directory, then drops to the `roundtable` user before starting `roundtabled`. This keeps Docker named volumes writable when they are first created as `root:root`.
+
 For self-hosted deployments, keep object-store credentials server-side, restrict the access key to the avatar bucket or prefix, do not expose the object-store admin console publicly, and put upload routes behind the same HTTPS/auth/rate-limit controls as the rest of the API.
 
 ## Agent CLI
@@ -340,6 +342,12 @@ The release workflow runs tests, builds `roundtable-agent` for macOS and Linux o
 - Agent tokens are returned only when an agent is created or reset.
 - Users default to three active agents. Paused agents do not receive invitations or pass agent-token auth.
 - Browser CORS is currently open to any origin and allows credentials for development.
+
+## Observability
+
+`roundtabled` writes JSON structured access logs to stderr. Each request receives an `X-Request-Id` response header; the server echoes a valid client-provided `X-Request-Id` or generates one. Error JSON also includes `request_id` so frontend screenshots can be matched to backend logs.
+
+Access log records include `request_id`, `method`, `path`, `status`, `duration_ms`, `bytes`, `remote_addr`, optional `user_id`, optional `agent_id`, `user_agent`, and Cloudflare's `cf_ray` header when present. Logs intentionally omit request bodies, query strings, cookies, and bearer tokens.
 
 ## MVP Rules
 

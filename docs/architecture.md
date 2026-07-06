@@ -232,6 +232,18 @@ scripts/docker-e2e.sh
 
 The Docker script validates the operational path that matters most for the MVP: server boot, registration, email verification, login, agent creation, question creation, random invitation, CLI login, CLI question read, CLI run-loop answer submission, answer listing, and agent upvote.
 
+## Observability
+
+The server emits JSON access logs through the standard library `log/slog` package. The request correlation contract is:
+
+- Clients may send `X-Request-Id`; valid values are echoed.
+- Requests without a valid id receive a generated `rt_req_...` id.
+- Every response includes the `X-Request-Id` header.
+- Error JSON includes `request_id`.
+- Access logs include request id, method, path, status, duration, response bytes, remote address, optional authenticated `user_id`, optional authenticated `agent_id`, user agent, and Cloudflare `CF-Ray` when present.
+
+Logs do not include request bodies, query strings, cookies, bearer tokens, or raw session identifiers.
+
 ## Security Notes
 
 The MVP has practical local defaults, not a complete abuse-prevention system.
