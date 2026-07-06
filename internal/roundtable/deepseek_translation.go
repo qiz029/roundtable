@@ -14,19 +14,25 @@ import (
 
 const defaultDeepSeekTranslationModel = "deepseek-v4-flash"
 const defaultDeepSeekAPIBaseURL = "https://api.deepseek.com"
+const defaultDeepSeekInputCostMicrosPerMillion = 140000
+const defaultDeepSeekOutputCostMicrosPerMillion = 280000
 
 type DeepSeekTranslationProviderOptions struct {
-	APIKey     string
-	APIBaseURL string
-	Model      string
-	HTTPClient *http.Client
+	APIKey                     string
+	APIBaseURL                 string
+	Model                      string
+	InputCostMicrosPerMillion  int
+	OutputCostMicrosPerMillion int
+	HTTPClient                 *http.Client
 }
 
 type DeepSeekTranslationProvider struct {
-	apiKey     string
-	apiBaseURL string
-	model      string
-	client     *http.Client
+	apiKey                     string
+	apiBaseURL                 string
+	model                      string
+	inputCostMicrosPerMillion  int
+	outputCostMicrosPerMillion int
+	client                     *http.Client
 }
 
 func NewDeepSeekTranslationProvider(opts DeepSeekTranslationProviderOptions) (*DeepSeekTranslationProvider, error) {
@@ -42,15 +48,25 @@ func NewDeepSeekTranslationProvider(opts DeepSeekTranslationProviderOptions) (*D
 	if model == "" {
 		model = defaultDeepSeekTranslationModel
 	}
+	inputCostMicrosPerMillion := opts.InputCostMicrosPerMillion
+	if inputCostMicrosPerMillion <= 0 {
+		inputCostMicrosPerMillion = defaultDeepSeekInputCostMicrosPerMillion
+	}
+	outputCostMicrosPerMillion := opts.OutputCostMicrosPerMillion
+	if outputCostMicrosPerMillion <= 0 {
+		outputCostMicrosPerMillion = defaultDeepSeekOutputCostMicrosPerMillion
+	}
 	client := opts.HTTPClient
 	if client == nil {
 		client = &http.Client{Timeout: 30 * time.Second}
 	}
 	return &DeepSeekTranslationProvider{
-		apiKey:     apiKey,
-		apiBaseURL: apiBaseURL,
-		model:      model,
-		client:     client,
+		apiKey:                     apiKey,
+		apiBaseURL:                 apiBaseURL,
+		model:                      model,
+		inputCostMicrosPerMillion:  inputCostMicrosPerMillion,
+		outputCostMicrosPerMillion: outputCostMicrosPerMillion,
+		client:                     client,
 	}, nil
 }
 
@@ -103,8 +119,25 @@ func (p *DeepSeekTranslationProvider) Translate(ctx context.Context, req Transla
 		Model:        model,
 		InputTokens:  decoded.Usage.PromptTokens,
 		OutputTokens: decoded.Usage.CompletionTokens,
-		CostMicros:   0,
+		CostMicros: calculateTranslationCostMicros(
+			decoded.Usage.PromptTokens,
+			decoded.Usage.CompletionTokens,
+			p.inputCostMicrosPerMillion,
+			p.outputCostMicrosPerMillion,
+		),
 	}, nil
+}
+
+func calculateTranslationCostMicros(inputTokens int, outputTokens int, inputCostMicrosPerMillion int, outputCostMicrosPerMillion int) int {
+	return costMicrosForTokens(inputTokens, inputCostMicrosPerMillion) +
+		costMicrosForTokens(outputTokens, outputCostMicrosPerMillion)
+}
+
+func costMicrosForTokens(tokens int, costMicrosPerMillion int) int {
+	if tokens <= 0 || costMicrosPerMillion <= 0 {
+		return 0
+	}
+	return int((int64(tokens)*int64(costMicrosPerMillion) + 999999) / 1000000)
 }
 
 func (p *DeepSeekTranslationProvider) chatCompletionPayload(req TranslationProviderRequest) map[string]any {

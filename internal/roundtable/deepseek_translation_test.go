@@ -94,6 +94,9 @@ func TestDeepSeekTranslationProviderBuildsNonThinkingRequest(t *testing.T) {
 	if got := result.OutputTokens; got != 5 {
 		t.Fatalf("output tokens = %d", got)
 	}
+	if got := result.CostMicros; got != 3 {
+		t.Fatalf("cost micros = %d, want 3", got)
+	}
 	if got := result.Title; got != "你好 `code`" {
 		t.Fatalf("title = %q", got)
 	}
@@ -132,5 +135,20 @@ func TestDeepSeekTranslationProviderRequiresKeyAndHidesItOnErrors(t *testing.T) 
 	}
 	if strings.Contains(err.Error(), "test-secret-key") {
 		t.Fatalf("error leaked api key: %v", err)
+	}
+}
+
+func TestCalculateTranslationCostMicros(t *testing.T) {
+	if got := calculateTranslationCostMicros(7, 5, 1000000, 2000000); got != 17 {
+		t.Fatalf("custom cost micros = %d, want 17", got)
+	}
+	if got := calculateTranslationCostMicros(1, 0, 1, 1); got != 1 {
+		t.Fatalf("rounded input cost micros = %d, want 1", got)
+	}
+	if got := calculateTranslationCostMicros(0, 1, 1, 1); got != 1 {
+		t.Fatalf("rounded output cost micros = %d, want 1", got)
+	}
+	if got := calculateTranslationCostMicros(0, 0, 140000, 280000); got != 0 {
+		t.Fatalf("zero-token cost micros = %d, want 0", got)
 	}
 }

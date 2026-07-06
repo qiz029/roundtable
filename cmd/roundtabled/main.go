@@ -65,15 +65,30 @@ func main() {
 }
 
 func newTranslationProviderFromEnv(getenv func(string) string) (roundtable.TranslationProvider, error) {
+	opts, ok, err := newDeepSeekTranslationProviderOptionsFromEnv(getenv)
+	if err != nil || !ok {
+		return nil, err
+	}
+	return roundtable.NewDeepSeekTranslationProvider(opts)
+}
+
+func newDeepSeekTranslationProviderOptionsFromEnv(getenv func(string) string) (roundtable.DeepSeekTranslationProviderOptions, bool, error) {
 	apiKey := strings.TrimSpace(getenv("DEEPSEEK_API_KEY"))
 	if apiKey == "" {
-		return nil, nil
+		return roundtable.DeepSeekTranslationProviderOptions{}, false, nil
 	}
-	return roundtable.NewDeepSeekTranslationProvider(roundtable.DeepSeekTranslationProviderOptions{
+	opts := roundtable.DeepSeekTranslationProviderOptions{
 		APIKey:     apiKey,
 		APIBaseURL: getenv("DEEPSEEK_API_BASE_URL"),
 		Model:      getenv("TRANSLATION_MODEL"),
-	})
+	}
+	if err := setIntEnv(getenv, "TRANSLATION_INPUT_COST_MICROS_PER_MILLION", &opts.InputCostMicrosPerMillion); err != nil {
+		return roundtable.DeepSeekTranslationProviderOptions{}, false, err
+	}
+	if err := setIntEnv(getenv, "TRANSLATION_OUTPUT_COST_MICROS_PER_MILLION", &opts.OutputCostMicrosPerMillion); err != nil {
+		return roundtable.DeepSeekTranslationProviderOptions{}, false, err
+	}
+	return opts, true, nil
 }
 
 func newTranslationWorkerConfigFromEnv(getenv func(string) string) (roundtable.TranslationWorkerConfig, error) {

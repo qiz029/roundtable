@@ -134,16 +134,32 @@ func TestNewTranslationProviderFromEnvDefaultsDisabledWithoutKey(t *testing.T) {
 }
 
 func TestNewTranslationProviderFromEnvConfiguresDeepSeek(t *testing.T) {
-	provider, err := newTranslationProviderFromEnv(mapLookup(map[string]string{
-		"DEEPSEEK_API_KEY":      "test-deepseek-key",
-		"DEEPSEEK_API_BASE_URL": "https://deepseek.example.com/",
-		"TRANSLATION_MODEL":     "deepseek-v4-flash",
-	}))
+	getenv := mapLookup(map[string]string{
+		"DEEPSEEK_API_KEY":                           "test-deepseek-key",
+		"DEEPSEEK_API_BASE_URL":                      "https://deepseek.example.com/",
+		"TRANSLATION_MODEL":                          "deepseek-v4-flash",
+		"TRANSLATION_INPUT_COST_MICROS_PER_MILLION":  "123000",
+		"TRANSLATION_OUTPUT_COST_MICROS_PER_MILLION": "456000",
+	})
+	provider, err := newTranslationProviderFromEnv(getenv)
 	if err != nil {
 		t.Fatalf("new translation provider from env: %v", err)
 	}
 	if _, ok := provider.(*roundtable.DeepSeekTranslationProvider); !ok {
 		t.Fatalf("provider = %T, want *roundtable.DeepSeekTranslationProvider", provider)
+	}
+	opts, ok, err := newDeepSeekTranslationProviderOptionsFromEnv(getenv)
+	if err != nil {
+		t.Fatalf("new deepseek options: %v", err)
+	}
+	if !ok {
+		t.Fatal("deepseek options disabled, want enabled")
+	}
+	if opts.InputCostMicrosPerMillion != 123000 {
+		t.Fatalf("input cost = %d", opts.InputCostMicrosPerMillion)
+	}
+	if opts.OutputCostMicrosPerMillion != 456000 {
+		t.Fatalf("output cost = %d", opts.OutputCostMicrosPerMillion)
 	}
 }
 
@@ -197,6 +213,21 @@ func TestNewTranslationWorkerConfigFromEnvRejectsBadValues(t *testing.T) {
 		"TRANSLATION_WORKER_POLL_INTERVAL": "soon",
 	})); err == nil {
 		t.Fatal("expected bad poll interval error")
+	}
+}
+
+func TestNewDeepSeekTranslationProviderOptionsFromEnvRejectsBadCost(t *testing.T) {
+	if _, _, err := newDeepSeekTranslationProviderOptionsFromEnv(mapLookup(map[string]string{
+		"DEEPSEEK_API_KEY":                           "test-deepseek-key",
+		"TRANSLATION_INPUT_COST_MICROS_PER_MILLION":  "expensive",
+		"TRANSLATION_OUTPUT_COST_MICROS_PER_MILLION": "456000",
+	})); err == nil {
+		t.Fatal("expected bad input cost error")
+	}
+	if _, ok, err := newDeepSeekTranslationProviderOptionsFromEnv(mapLookup(map[string]string{
+		"TRANSLATION_INPUT_COST_MICROS_PER_MILLION": "expensive",
+	})); err != nil || ok {
+		t.Fatalf("no-key options = ok %v err %v, want disabled nil error", ok, err)
 	}
 }
 

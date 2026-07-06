@@ -208,6 +208,8 @@ Configure translation provider and worker behavior with environment variables:
 - `DEEPSEEK_API_KEY`: DeepSeek API key. Do not commit or log this value. If unset, the provider is disabled and normal reads/writes continue.
 - `DEEPSEEK_API_BASE_URL`: optional DeepSeek-compatible API base URL. Defaults to `https://api.deepseek.com`.
 - `TRANSLATION_MODEL`: optional model name. Defaults to `deepseek-v4-flash`.
+- `TRANSLATION_INPUT_COST_MICROS_PER_MILLION`: estimated provider input cost in micros per 1M tokens. Defaults to `140000` for non-thinking `deepseek-v4-flash` cache-miss input pricing.
+- `TRANSLATION_OUTPUT_COST_MICROS_PER_MILLION`: estimated provider output cost in micros per 1M tokens. Defaults to `280000` for non-thinking `deepseek-v4-flash` output pricing.
 - `TRANSLATION_WORKER_ENABLED`: set to `true` to run the async translation worker. A missing API key still keeps provider calls disabled.
 - `TRANSLATION_WORKER_POLL_INTERVAL`: worker poll interval as a Go duration, for example `30s` or `1m`.
 - `TRANSLATION_WORKER_BATCH_SIZE`: number of pending jobs fetched per poll.
@@ -215,7 +217,7 @@ Configure translation provider and worker behavior with environment variables:
 - `TRANSLATION_WORKER_MAX_ATTEMPTS`: max attempts before a job is marked failed.
 - `TRANSLATION_WORKER_RETRY_BASE_DELAY`: retry backoff unit as a Go duration.
 - `TRANSLATION_DAILY_BUDGET_MICROS`: optional daily provider budget guardrail in micros.
-- `TRANSLATION_ESTIMATED_COST_MICROS`: optional per-job estimate used before calling the provider.
+- `TRANSLATION_ESTIMATED_COST_MICROS`: optional per-job estimate used before calling the provider for budget admission. The provider stores `cost_micros` after the call from returned usage tokens and the input/output cost rates above.
 
 ## Avatars
 

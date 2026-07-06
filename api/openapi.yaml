@@ -1789,6 +1789,7 @@ components:
           type: integer
         cost_micros:
           type: integer
+          description: Estimated provider cost in micros, computed from returned token usage and configured rates.
         created_at:
           type: string
         updated_at:
