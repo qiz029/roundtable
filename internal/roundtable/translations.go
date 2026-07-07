@@ -116,7 +116,7 @@ func validLanguage(language string) bool {
 }
 
 func validResourceType(resourceType string) bool {
-	return resourceType == "question" || resourceType == "answer"
+	return resourceType == "question" || resourceType == "answer" || resourceType == "answer_response"
 }
 
 func detectTranslationSourceLanguage(title string, body string) string {
@@ -181,8 +181,24 @@ func (a *App) loadTranslatableResource(ctx context.Context, resourceType string,
 				AND question_author.status = 'active'
 				AND owner.status = 'active'
 		`, resourceID).Scan(&resource.Body)
+	case "answer_response":
+		err = a.db.QueryRowContext(ctx, `
+			SELECT r.body
+			FROM answer_responses r
+			JOIN answers ans ON ans.id = r.answer_id
+			JOIN questions q ON q.id = ans.question_id
+			JOIN users question_author ON question_author.id = q.author_user_id
+			JOIN agents answer_agent ON answer_agent.id = ans.agent_id
+			JOIN users answer_owner ON answer_owner.id = answer_agent.owner_user_id
+			JOIN agents response_agent ON response_agent.id = r.agent_id
+			JOIN users response_owner ON response_owner.id = response_agent.owner_user_id
+			WHERE r.id = $1
+				AND question_author.status = 'active'
+				AND answer_owner.status = 'active'
+				AND response_owner.status = 'active'
+		`, resourceID).Scan(&resource.Body)
 	default:
-		return translatableResource{}, errInvalidInput("resource_type must be question or answer")
+		return translatableResource{}, errInvalidInput("resource_type must be question, answer, or answer_response")
 	}
 	if err != nil {
 		return translatableResource{}, err
@@ -214,7 +230,7 @@ func (a *App) translationByCacheKey(ctx context.Context, resource translatableRe
 
 func (a *App) enqueueTranslationJob(ctx context.Context, resource translatableResource, targetLanguage string) error {
 	if !validResourceType(resource.Type) {
-		return errInvalidInput("resource_type must be question or answer")
+		return errInvalidInput("resource_type must be question, answer, or answer_response")
 	}
 	if !validLanguage(targetLanguage) {
 		return errInvalidInput("target_language must be en or zh-CN")
@@ -318,6 +334,103 @@ func (a *App) enqueueTranslationBackfill(ctx context.Context) error {
 	for _, id := range answerIDs {
 		if err := a.enqueueTranslationJobsForResource(ctx, "answer", id); err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
+		}
+	}
+
+	rows, err = a.db.QueryContext(ctx, `
+		SELECT r.id
+		FROM answer_responses r
+		JOIN answers ans ON ans.id = r.answer_id
+		JOIN questions q ON q.id = ans.question_id
+		JOIN users question_author ON question_author.id = q.author_user_id
+		JOIN agents answer_agent ON answer_agent.id = ans.agent_id
+		JOIN users answer_owner ON answer_owner.id = answer_agent.owner_user_id
+		JOIN agents response_agent ON response_agent.id = r.agent_id
+		JOIN users response_owner ON response_owner.id = response_agent.owner_user_id
+		WHERE question_author.status = 'active'
+			AND answer_owner.status = 'active'
+			AND response_owner.status = 'active'
+	`)
+	if err != nil {
+		return err
+	}
+	responseIDs := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		responseIDs = append(responseIDs, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range responseIDs {
+		if err := a.enqueueTranslationJobsForResource(ctx, "answer_response", id); err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+	}
+	if err := a.requeueQuestionTranslationsMissingTitle(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (a *App) requeueQuestionTranslationsMissingTitle(ctx context.Context) error {
+	rows, err := a.db.QueryContext(ctx, `
+		SELECT DISTINCT ct.resource_id, ct.target_language
+		FROM content_translations ct
+		JOIN questions q ON q.id = ct.resource_id
+		JOIN users author ON author.id = q.author_user_id
+		WHERE ct.resource_type = 'question'
+			AND ct.translation_version = $1
+			AND TRIM(ct.translated_title) = ''
+			AND TRIM(q.title) <> ''
+			AND author.status = 'active'
+	`, translationVersion)
+	if err != nil {
+		return err
+	}
+	type candidate struct {
+		resourceID     string
+		targetLanguage string
+	}
+	candidates := []candidate{}
+	for rows.Next() {
+		var item candidate
+		if err := rows.Scan(&item.resourceID, &item.targetLanguage); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		candidates = append(candidates, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+
+	for _, item := range candidates {
+		resource, err := a.loadTranslatableResource(ctx, "question", item.resourceID)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if resource.SourceLanguage == item.targetLanguage {
+			continue
+		}
+		record, err := a.translationByCacheKey(ctx, resource, item.targetLanguage)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if translationRecordMissingRequiredTitle(resource, record) {
+			if err := a.requeueTranslationCache(ctx, resource, item.targetLanguage, "question translation missing title"); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -461,8 +574,13 @@ func (a *App) processTranslationJob(ctx context.Context, job translationJob) (bo
 	if resource.SourceLanguage == job.TargetLanguage {
 		return true, a.markTranslationJobSucceeded(ctx, job, TranslationProviderResult{})
 	}
-	if _, err := a.translationByCacheKey(ctx, resource, job.TargetLanguage); err == nil {
-		return true, a.markTranslationJobSucceeded(ctx, job, TranslationProviderResult{})
+	if record, err := a.translationByCacheKey(ctx, resource, job.TargetLanguage); err == nil {
+		if !translationRecordMissingRequiredTitle(resource, record) {
+			return true, a.markTranslationJobSucceeded(ctx, job, TranslationProviderResult{})
+		}
+		if err := a.deleteTranslationCache(ctx, resource, job.TargetLanguage); err != nil {
+			return true, err
+		}
 	} else if !errors.Is(err, sql.ErrNoRows) {
 		return true, err
 	}
@@ -483,6 +601,9 @@ func (a *App) processTranslationJob(ctx context.Context, job translationJob) (bo
 	if err != nil {
 		return true, a.retryOrFailTranslationJob(ctx, job, err.Error())
 	}
+	if err := validateTranslationProviderResult(resource, providerResult); err != nil {
+		return true, a.retryOrFailTranslationJob(ctx, job, err.Error())
+	}
 	if providerResult.Provider == "" {
 		providerResult.Provider = "unknown"
 	}
@@ -493,6 +614,90 @@ func (a *App) processTranslationJob(ctx context.Context, job translationJob) (bo
 		return true, err
 	}
 	return true, a.markTranslationJobSucceeded(ctx, job, providerResult)
+}
+
+func translationRecordMissingRequiredTitle(resource translatableResource, record translationRecord) bool {
+	return resource.Type == "question" &&
+		strings.TrimSpace(resource.Title) != "" &&
+		strings.TrimSpace(record.TranslatedTitle) == ""
+}
+
+func validateTranslationProviderResult(resource translatableResource, result TranslationProviderResult) error {
+	if resource.Type == "question" &&
+		strings.TrimSpace(resource.Title) != "" &&
+		strings.TrimSpace(result.Title) == "" {
+		return errors.New("translation provider returned empty title for question")
+	}
+	return nil
+}
+
+func (a *App) deleteTranslationCache(ctx context.Context, resource translatableResource, targetLanguage string) error {
+	_, err := a.db.ExecContext(ctx, `
+		DELETE FROM content_translations
+		WHERE resource_type = $1
+			AND resource_id = $2
+			AND target_language = $3
+			AND source_hash = $4
+			AND translation_version = $5
+	`, resource.Type, resource.ID, targetLanguage, resource.SourceHash, translationVersion)
+	return err
+}
+
+func (a *App) requeueTranslationCache(ctx context.Context, resource translatableResource, targetLanguage string, reason string) error {
+	if !validResourceType(resource.Type) {
+		return errInvalidInput("resource_type must be question, answer, or answer_response")
+	}
+	if !validLanguage(targetLanguage) {
+		return errInvalidInput("target_language must be en or zh-CN")
+	}
+	if resource.SourceLanguage == targetLanguage {
+		return nil
+	}
+	jobID, err := newID("trj")
+	if err != nil {
+		return err
+	}
+	now := a.now().UTC().Format(time.RFC3339Nano)
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `
+		DELETE FROM content_translations
+		WHERE resource_type = $1
+			AND resource_id = $2
+			AND target_language = $3
+			AND source_hash = $4
+			AND translation_version = $5
+	`, resource.Type, resource.ID, targetLanguage, resource.SourceHash, translationVersion); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO translation_jobs (
+			id, resource_type, resource_id, target_language, source_hash, translation_version,
+			status, attempts, max_attempts, next_attempt_at, last_error, created_at, updated_at
+		)
+		VALUES ($1, $2, $3, $4, $5, $6, 'pending', 0, $7, $8, $9, $8, $8)
+		ON CONFLICT (resource_type, resource_id, target_language, source_hash, translation_version)
+		DO UPDATE SET
+			status = 'pending',
+			attempts = 0,
+			max_attempts = EXCLUDED.max_attempts,
+			next_attempt_at = EXCLUDED.next_attempt_at,
+			locked_at = NULL,
+			provider = '',
+			model = '',
+			input_tokens = 0,
+			output_tokens = 0,
+			cost_micros = 0,
+			last_error = EXCLUDED.last_error,
+			updated_at = EXCLUDED.updated_at
+	`, jobID, resource.Type, resource.ID, targetLanguage, resource.SourceHash,
+		translationVersion, a.translationWorker.MaxAttempts, now, reason); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (a *App) storeTranslation(ctx context.Context, resource translatableResource, targetLanguage string, result TranslationProviderResult) error {

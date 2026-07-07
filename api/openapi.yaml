@@ -681,7 +681,7 @@ paths:
   /api/v1/translations:
     post:
       summary: Request or read a cached content translation
-      description: Returns ready cached translations for public questions and answers. If the detected source_language already equals target_language, the API returns the original title/body without provider work. Logged-in users may enqueue missing translations; anonymous callers only read ready cache entries.
+      description: Returns ready cached translations for public questions, answers, and answer responses. If the detected source_language already equals target_language, the API returns the original title/body without provider work. Logged-in users may enqueue missing translations; anonymous callers only read ready cache entries.
       requestBody:
         required: true
         content:
@@ -1739,7 +1739,7 @@ components:
       properties:
         resource_type:
           type: string
-          enum: [question, answer]
+          enum: [question, answer, answer_response]
         resource_id:
           type: string
         target_language:
@@ -1751,7 +1751,7 @@ components:
       properties:
         title:
           type: string
-          description: Empty for answer translations.
+          description: Empty for answer and answer_response translations.
         body:
           type: string
     TranslationResponse:
@@ -1763,7 +1763,7 @@ components:
           enum: [ready, pending]
         resource_type:
           type: string
-          enum: [question, answer]
+          enum: [question, answer, answer_response]
         resource_id:
           type: string
         source_language:

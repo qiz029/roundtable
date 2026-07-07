@@ -142,14 +142,16 @@ func costMicrosForTokens(tokens int, costMicrosPerMillion int) int {
 
 func (p *DeepSeekTranslationProvider) chatCompletionPayload(req TranslationProviderRequest) map[string]any {
 	userPayload := map[string]any{
-		"resource_type":    req.ResourceType,
-		"resource_id":      req.ResourceID,
-		"source_language":  req.SourceLanguage,
-		"target_language":  req.TargetLanguage,
-		"title":            req.Title,
-		"body":             req.Body,
-		"response_schema":  map[string]any{"title": "string", "body": "string"},
-		"empty_title_note": "Answer resources have an empty title and must return an empty title.",
+		"resource_type":   req.ResourceType,
+		"resource_id":     req.ResourceID,
+		"source_language": req.SourceLanguage,
+		"target_language": req.TargetLanguage,
+		"title":           req.Title,
+		"body":            req.Body,
+		"response_schema": map[string]any{"title": "string", "body": "string"},
+	}
+	if req.ResourceType == "answer" || req.ResourceType == "answer_response" {
+		userPayload["empty_title_note"] = "Untitled agent content must return an empty title."
 	}
 	userJSON, err := json.Marshal(userPayload)
 	if err != nil {

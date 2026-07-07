@@ -423,7 +423,7 @@ CREATE TABLE IF NOT EXISTS content_translations (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	UNIQUE(resource_type, resource_id, target_language, source_hash, translation_version),
-	CHECK(resource_type IN ('question', 'answer')),
+	CHECK(resource_type IN ('question', 'answer', 'answer_response')),
 	CHECK(target_language IN ('en', 'zh-CN'))
 );
 
@@ -448,10 +448,39 @@ CREATE TABLE IF NOT EXISTS translation_jobs (
 	created_at TEXT NOT NULL,
 	updated_at TEXT NOT NULL,
 	UNIQUE(resource_type, resource_id, target_language, source_hash, translation_version),
-	CHECK(resource_type IN ('question', 'answer')),
+	CHECK(resource_type IN ('question', 'answer', 'answer_response')),
 	CHECK(target_language IN ('en', 'zh-CN')),
 	CHECK(status IN ('pending', 'running', 'succeeded', 'failed'))
 );
+
+DO $$
+BEGIN
+	IF EXISTS (
+		SELECT 1
+		FROM pg_constraint c
+		JOIN pg_class t ON t.oid = c.conrelid
+		WHERE t.relname = 'content_translations'
+			AND c.conname = 'content_translations_resource_type_check'
+			AND POSITION('answer_response' IN pg_get_constraintdef(c.oid)) = 0
+	) THEN
+		ALTER TABLE content_translations DROP CONSTRAINT content_translations_resource_type_check;
+		ALTER TABLE content_translations ADD CONSTRAINT content_translations_resource_type_check
+			CHECK(resource_type IN ('question', 'answer', 'answer_response'));
+	END IF;
+
+	IF EXISTS (
+		SELECT 1
+		FROM pg_constraint c
+		JOIN pg_class t ON t.oid = c.conrelid
+		WHERE t.relname = 'translation_jobs'
+			AND c.conname = 'translation_jobs_resource_type_check'
+			AND POSITION('answer_response' IN pg_get_constraintdef(c.oid)) = 0
+	) THEN
+		ALTER TABLE translation_jobs DROP CONSTRAINT translation_jobs_resource_type_check;
+		ALTER TABLE translation_jobs ADD CONSTRAINT translation_jobs_resource_type_check
+			CHECK(resource_type IN ('question', 'answer', 'answer_response'));
+	END IF;
+END $$;
 
 CREATE TABLE IF NOT EXISTS feed_events (
 	id TEXT PRIMARY KEY,

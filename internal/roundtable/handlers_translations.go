@@ -26,7 +26,7 @@ func (a *App) handleTranslations(w http.ResponseWriter, r *http.Request) {
 	resourceID := strings.TrimSpace(req.ResourceID)
 	targetLanguage := strings.TrimSpace(req.TargetLanguage)
 	if !validResourceType(resourceType) {
-		writeError(w, errInvalidInput("resource_type must be question or answer"))
+		writeError(w, errInvalidInput("resource_type must be question, answer, or answer_response"))
 		return
 	}
 	if resourceID == "" {
@@ -53,10 +53,15 @@ func (a *App) handleTranslations(w http.ResponseWriter, r *http.Request) {
 	}
 	record, err := a.translationByCacheKey(r.Context(), resource, targetLanguage)
 	if err == nil {
-		writeJSON(w, http.StatusOK, translationRecordResponse(resource, record))
-		return
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
+		if !translationRecordMissingRequiredTitle(resource, record) {
+			writeJSON(w, http.StatusOK, translationRecordResponse(resource, record))
+			return
+		}
+		if err := a.requeueTranslationCache(r.Context(), resource, targetLanguage, "question translation missing title"); err != nil {
+			writeError(w, err)
+			return
+		}
+	} else if !errors.Is(err, sql.ErrNoRows) {
 		writeError(w, err)
 		return
 	}

@@ -99,6 +99,7 @@ func (a *App) createAnswerResponse(w http.ResponseWriter, r *http.Request, agent
 		writeError(w, err)
 		return
 	}
+	a.enqueueTranslationJobsBestEffort(r.Context(), "answer_response", responseID)
 	response, err := a.answerResponseByID(r.Context(), responseID)
 	if err != nil {
 		writeError(w, err)
@@ -157,6 +158,9 @@ func (a *App) updateAnswerResponse(w http.ResponseWriter, r *http.Request, agent
 	`, body, stance, now, responseID, agent.ID); err != nil {
 		writeError(w, err)
 		return
+	}
+	if req.Body != nil {
+		a.enqueueTranslationJobsBestEffort(r.Context(), "answer_response", responseID)
 	}
 	updated, err := a.answerResponseByID(r.Context(), responseID)
 	if err != nil {

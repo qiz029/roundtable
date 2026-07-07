@@ -287,6 +287,53 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 			source TEXT NOT NULL DEFAULT 'feed',
 			created_at TEXT NOT NULL
 		);
+
+		CREATE TABLE content_translations (
+			id TEXT PRIMARY KEY,
+			resource_type TEXT NOT NULL,
+			resource_id TEXT NOT NULL,
+			target_language TEXT NOT NULL,
+			source_hash TEXT NOT NULL,
+			translation_version INTEGER NOT NULL,
+			translated_title TEXT NOT NULL DEFAULT '',
+			translated_body TEXT NOT NULL DEFAULT '',
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			cost_micros INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(resource_type, resource_id, target_language, source_hash, translation_version),
+			CHECK(resource_type IN ('question', 'answer')),
+			CHECK(target_language IN ('en', 'zh-CN'))
+		);
+
+		CREATE TABLE translation_jobs (
+			id TEXT PRIMARY KEY,
+			resource_type TEXT NOT NULL,
+			resource_id TEXT NOT NULL,
+			target_language TEXT NOT NULL,
+			source_hash TEXT NOT NULL,
+			translation_version INTEGER NOT NULL,
+			status TEXT NOT NULL DEFAULT 'pending',
+			attempts INTEGER NOT NULL DEFAULT 0,
+			max_attempts INTEGER NOT NULL DEFAULT 3,
+			next_attempt_at TEXT NOT NULL,
+			locked_at TEXT,
+			provider TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			input_tokens INTEGER NOT NULL DEFAULT 0,
+			output_tokens INTEGER NOT NULL DEFAULT 0,
+			cost_micros INTEGER NOT NULL DEFAULT 0,
+			last_error TEXT NOT NULL DEFAULT '',
+			created_at TEXT NOT NULL,
+			updated_at TEXT NOT NULL,
+			UNIQUE(resource_type, resource_id, target_language, source_hash, translation_version),
+			CHECK(resource_type IN ('question', 'answer')),
+			CHECK(target_language IN ('en', 'zh-CN')),
+			CHECK(status IN ('pending', 'running', 'succeeded', 'failed'))
+		);
 	`); err != nil {
 		t.Fatalf("seed old schema: %v", err)
 	}
@@ -318,6 +365,28 @@ func TestMigrateBackfillsAdditiveColumnsOnExistingTables(t *testing.T) {
 	assertSelectable(t, db, `SELECT answer_id, agent_id, body, stance, created_at, updated_at FROM answer_responses LIMIT 0`)
 	assertSelectable(t, db, `SELECT resource_type, resource_id, target_language, source_hash, translation_version FROM content_translations LIMIT 0`)
 	assertSelectable(t, db, `SELECT resource_type, resource_id, target_language, source_hash, status, attempts, last_error FROM translation_jobs LIMIT 0`)
+
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO content_translations (
+			id, resource_type, resource_id, target_language, source_hash, translation_version,
+			translated_body, provider, model, created_at, updated_at
+		)
+		VALUES ('trs_old_schema_answer_response', 'answer_response', 'rsp_old_schema', 'zh-CN', 'hash_old_schema', 1,
+			'translated response', 'fake', 'fake', $1, $1)
+	`, now); err != nil {
+		t.Fatalf("insert answer_response content translation after migration: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		INSERT INTO translation_jobs (
+			id, resource_type, resource_id, target_language, source_hash, translation_version,
+			next_attempt_at, created_at, updated_at
+		)
+		VALUES ('trj_old_schema_answer_response', 'answer_response', 'rsp_old_schema', 'zh-CN', 'hash_old_schema_2', 1,
+			$1, $1, $1)
+	`, now); err != nil {
+		t.Fatalf("insert answer_response translation job after migration: %v", err)
+	}
 }
 
 func TestSeedUserMarkerIsExposedAndReadOnly(t *testing.T) {
@@ -2807,6 +2876,180 @@ func TestTranslationCacheAPIAndWorker(t *testing.T) {
 	}
 	if got := provider.CallCount(); got != 2 {
 		t.Fatalf("provider call count after original response = %d, want 2", got)
+	}
+}
+
+func TestTranslationCacheSupportsAnswerResponses(t *testing.T) {
+	t.Parallel()
+
+	provider := &fakeTranslationProvider{}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := newTestApp(t, roundtable.Options{
+		Mailer:              mailer,
+		TranslationProvider: provider,
+		TranslationWorker: roundtable.TranslationWorkerConfig{
+			BatchSize: 20,
+		},
+		RateLimit: roundtable.RateLimitConfig{
+			AgentPerSecond: 100,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+	defer app.Close()
+
+	server := httptest.NewServer(app.Handler())
+	defer server.Close()
+
+	askerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, askerClient, server.URL, mailer, "translation-response-asker@example.com", "Translation Response Asker")
+	firstOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, firstOwnerClient, server.URL, mailer, "translation-response-first@example.com", "Translation Response First")
+	firstAgent := postJSON(t, firstOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Translation Response First Agent",
+		"is_public": true,
+	}, http.StatusCreated)
+	firstAgentToken := stringField(t, firstAgent, "token")
+	secondOwnerClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, secondOwnerClient, server.URL, mailer, "translation-response-second@example.com", "Translation Response Second")
+	secondAgent := postJSON(t, secondOwnerClient, server.URL+"/api/v1/me/agents", "", map[string]any{
+		"name":      "Translation Response Second Agent",
+		"is_public": true,
+	}, http.StatusCreated)
+	secondAgentToken := stringField(t, secondAgent, "token")
+
+	question := postJSON(t, askerClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Should answer responses be translated?",
+		"body":  "The response text is part of the public discussion.",
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+	answer := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/questions/"+questionID+"/answers", firstAgentToken, map[string]any{
+		"body": "Translate the base answer too.",
+	}, http.StatusCreated)
+	answerID := stringField(t, answer, "id")
+	response := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/agent/answers/"+answerID+"/responses", secondAgentToken, map[string]any{
+		"body":   "Translate this agent response.",
+		"stance": "clarify",
+	}, http.StatusCreated)
+	responseID := stringField(t, response, "id")
+
+	processed, err := app.ProcessTranslationJobs(context.Background(), 20)
+	if err != nil {
+		t.Fatalf("process translations: %v", err)
+	}
+	if processed != 3 {
+		t.Fatalf("processed jobs = %d, want 3", processed)
+	}
+
+	ready := postJSON(t, newHTTPClient(t), server.URL+"/api/v1/translations", "", map[string]any{
+		"resource_type":   "answer_response",
+		"resource_id":     responseID,
+		"target_language": "zh-CN",
+	}, http.StatusOK)
+	translation := mapField(t, ready, "translation")
+	if got := stringFieldAllowEmpty(t, translation, "title"); got != "" {
+		t.Fatalf("answer response translated title = %q, want empty", got)
+	}
+	if got := stringField(t, translation, "body"); got != "[zh-CN] Translate this agent response." {
+		t.Fatalf("answer response translated body = %q", got)
+	}
+	if got := provider.CallCount(); got != 3 {
+		t.Fatalf("provider call count = %d, want 3", got)
+	}
+}
+
+func TestTranslationBackfillRequeuesQuestionTranslationsMissingTitles(t *testing.T) {
+	t.Parallel()
+
+	databaseURL := newTestDatabaseURL(t)
+	provider := &fakeTranslationProvider{}
+	mailer := roundtable.NewMemoryMailer()
+	app, err := roundtable.NewApp(roundtable.Options{
+		DatabaseURL:         databaseURL,
+		Mailer:              mailer,
+		TranslationProvider: provider,
+		TranslationWorker: roundtable.TranslationWorkerConfig{
+			BatchSize: 10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("new app: %v", err)
+	}
+
+	server := httptest.NewServer(app.Handler())
+	userClient := newHTTPClient(t)
+	registerVerifyAndLoginUser(t, userClient, server.URL, mailer, "translation-repair-owner@example.com", "Translation Repair Owner")
+	question := postJSON(t, userClient, server.URL+"/api/v1/questions", "", map[string]any{
+		"title": "Repair missing translated titles",
+		"body":  "Existing cached translations should be regenerated.",
+	}, http.StatusCreated)
+	questionID := stringField(t, question, "id")
+
+	processed, err := app.ProcessTranslationJobs(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("process initial translation: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("initial processed jobs = %d, want 1", processed)
+	}
+	server.Close()
+	if err := app.Close(); err != nil {
+		t.Fatalf("close app: %v", err)
+	}
+
+	db, err := sql.Open("pgx", databaseURL)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	if _, err := db.ExecContext(context.Background(), `
+		UPDATE content_translations
+		SET translated_title = '', updated_at = $2
+		WHERE resource_type = 'question'
+			AND resource_id = $1
+			AND target_language = 'zh-CN'
+	`, questionID, time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatalf("corrupt cached translation title: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close db: %v", err)
+	}
+
+	reopenedProvider := &fakeTranslationProvider{}
+	reopened, err := roundtable.NewApp(roundtable.Options{
+		DatabaseURL:         databaseURL,
+		Mailer:              roundtable.NewMemoryMailer(),
+		TranslationProvider: reopenedProvider,
+		TranslationWorker: roundtable.TranslationWorkerConfig{
+			BatchSize: 10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("reopen app: %v", err)
+	}
+	defer reopened.Close()
+	reopenedServer := httptest.NewServer(reopened.Handler())
+	defer reopenedServer.Close()
+
+	processed, err = reopened.ProcessTranslationJobs(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("process repaired translation: %v", err)
+	}
+	if processed != 1 {
+		t.Fatalf("repaired processed jobs = %d, want 1", processed)
+	}
+	if got := reopenedProvider.CallCount(); got != 1 {
+		t.Fatalf("reopened provider call count = %d, want 1", got)
+	}
+
+	ready := postJSON(t, newHTTPClient(t), reopenedServer.URL+"/api/v1/translations", "", map[string]any{
+		"resource_type":   "question",
+		"resource_id":     questionID,
+		"target_language": "zh-CN",
+	}, http.StatusOK)
+	translation := mapField(t, ready, "translation")
+	if got := stringField(t, translation, "title"); got != "[zh-CN] Repair missing translated titles" {
+		t.Fatalf("repaired translated title = %q", got)
 	}
 }
 

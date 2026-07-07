@@ -105,6 +105,46 @@ func TestDeepSeekTranslationProviderBuildsNonThinkingRequest(t *testing.T) {
 	}
 }
 
+func TestDeepSeekTranslationProviderOnlyAddsEmptyTitleNoteForUntitledAgentContent(t *testing.T) {
+	questionPayload := deepSeekUserPayload(t, TranslationProviderRequest{
+		ResourceType:   "question",
+		ResourceID:     "qst_test",
+		SourceLanguage: "en",
+		TargetLanguage: "zh-CN",
+		Title:          "Question title",
+		Body:           "Question body",
+	})
+	if got, ok := questionPayload["empty_title_note"]; ok {
+		t.Fatalf("question payload empty_title_note = %#v, want absent", got)
+	}
+
+	answerPayload := deepSeekUserPayload(t, TranslationProviderRequest{
+		ResourceType:   "answer",
+		ResourceID:     "ans_test",
+		SourceLanguage: "en",
+		TargetLanguage: "zh-CN",
+		Title:          "",
+		Body:           "Answer body",
+	})
+	got, ok := answerPayload["empty_title_note"].(string)
+	if !ok || !strings.Contains(got, "empty title") {
+		t.Fatalf("answer payload empty_title_note = %#v, want answer title guidance", answerPayload["empty_title_note"])
+	}
+
+	responsePayload := deepSeekUserPayload(t, TranslationProviderRequest{
+		ResourceType:   "answer_response",
+		ResourceID:     "rsp_test",
+		SourceLanguage: "en",
+		TargetLanguage: "zh-CN",
+		Title:          "",
+		Body:           "Response body",
+	})
+	got, ok = responsePayload["empty_title_note"].(string)
+	if !ok || !strings.Contains(got, "empty title") {
+		t.Fatalf("answer response payload empty_title_note = %#v, want empty title guidance", responsePayload["empty_title_note"])
+	}
+}
+
 func TestDeepSeekTranslationProviderRequiresKeyAndHidesItOnErrors(t *testing.T) {
 	if _, err := NewDeepSeekTranslationProvider(DeepSeekTranslationProviderOptions{}); err == nil {
 		t.Fatal("expected missing api key error")
@@ -136,6 +176,24 @@ func TestDeepSeekTranslationProviderRequiresKeyAndHidesItOnErrors(t *testing.T) 
 	if strings.Contains(err.Error(), "test-secret-key") {
 		t.Fatalf("error leaked api key: %v", err)
 	}
+}
+
+func deepSeekUserPayload(t *testing.T, req TranslationProviderRequest) map[string]any {
+	t.Helper()
+	provider := &DeepSeekTranslationProvider{model: "deepseek-v4-flash"}
+	payload := provider.chatCompletionPayload(req)
+	messages, ok := payload["messages"].([]map[string]string)
+	if !ok {
+		t.Fatalf("messages = %#v, want []map[string]string", payload["messages"])
+	}
+	if len(messages) != 2 {
+		t.Fatalf("messages length = %d, want 2", len(messages))
+	}
+	var userPayload map[string]any
+	if err := json.Unmarshal([]byte(messages[1]["content"]), &userPayload); err != nil {
+		t.Fatalf("decode user payload: %v", err)
+	}
+	return userPayload
 }
 
 func TestCalculateTranslationCostMicros(t *testing.T) {
